@@ -2,53 +2,38 @@ import streamlit as st
 import folium
 from streamlit_folium import st_folium
 import sqlite3
-import pandas as pd
+import requests
+from geopy.distance import geodesic # Aggiungi 'geopy' al file requirements.txt
 
-# --- CONFIGURAZIONE DATABASE ---
-conn = sqlite3.connect('bovini.db', check_same_thread=False)
-c = conn.cursor()
-c.execute('CREATE TABLE IF NOT EXISTS mandria (id TEXT PRIMARY KEY, nome TEXT, lat REAL, lon REAL, batteria REAL, stato TEXT)')
-conn.commit()
+# --- FUNZIONI CORE ---
+def invia_telegram(msg):
+    token = st.secrets["TELEGRAM_TOKEN"]
+    chat_id = st.secrets["TELEGRAM_CHAT_ID"]
+    url = f"https://api.telegram.org{token}/sendMessage?chat_id={chat_id}&text={msg}"
+    requests.get(url)
 
-st.set_page_config(page_title="Monitoraggio Bovini", layout="wide")
+# --- APP ---
+st.title("🚜 Dashboard Bovini 2026")
 
-# --- SIDEBAR: GESTIONE MANDRIA ---
-st.sidebar.title("🐂 Gestione Mandria")
-nuovo_id = st.sidebar.text_input("ID Tracker (es. DevEUI)")
-nuovo_nome = st.sidebar.text_input("Nome Bovino")
+# Configurazione Recinto in Sidebar
+st.sidebar.header("📍 Recinto Virtuale")
+raggio_allarme = st.sidebar.slider("Raggio (metri)", 50, 1000, 200)
+centro_coords = (45.1743, 9.2394) # Pavia di test
 
-if st.sidebar.button("Registra Bovino"):
-    try:
-        c.execute('INSERT INTO mandria (id, nome, lat, lon, batteria, stato) VALUES (?, ?, ?, ?, ?, ?)', 
-                  (nuovo_id, nuovo_nome, 45.17, 9.23, 4.2, "In attesa"))
-        conn.commit()
-        st.sidebar.success(f"{nuovo_nome} registrato!")
-    except:
-        st.sidebar.error("ID già esistente o errore.")
+# Mappa
+m = folium.Map(location=centro_coords, zoom_start=15)
+folium.TileLayer(tiles='https://server.arcgisonline.com{z}/{y}/{x}', attr='Esri').add_to(m)
+folium.Circle(location=centro_coords, radius=raggio_allarme, color="red", fill=True).add_to(m)
 
-# --- DISPLAY LISTA BOVINI ---
-st.sidebar.subheader("Lista Capi")
-df = pd.read_sql_query("SELECT nome, batteria, stato FROM mandria", conn)
-st.sidebar.dataframe(df)
+# Simula posizione bovino per test
+bovino_coords = (45.1760, 9.2410) 
+distanza = geodesic(centro_coords, bovino_coords).meters
 
-# --- MAPPA PRINCIPALE ---
-st.title("🚜 Dashboard Satellitare")
+if distanza > raggio_allarme:
+    st.error(f"⚠️ ALLARME: Bovino fuori recinto! Distanza: {int(distanza)}m")
+    if st.button("Invia Allarme a Telegram"):
+        invia_telegram(f"🚨 ATTENZIONE: Un bovino è uscito dal recinto! Distanza attuale: {int(distanza)} metri.")
+else:
+    st.success("✅ Tutti i bovini sono nel recinto.")
 
-# Visualizzazione Mappa con fallback
-m = folium.Map(location=[45.17, 9.23], zoom_start=15)
-folium.TileLayer(
-    tiles='https://server.arcgisonline.com{z}/{y}/{x}',
-    attr='Esri World Imagery',
-    name='Satellite'
-).add_to(m)
-
-# Recupera posizioni dal database e metti i marker
-c.execute('SELECT nome, lat, lon FROM mandria')
-for row in c.fetchall():
-    folium.Marker([row[1], row[2]], popup=row[0], icon=folium.Icon(color='red')).add_to(m)
-
-# Visualizzazione forzata
-st_folium(m, width=1000, height=500, returned_objects=[])
-
-st.write("---")
-st.info("I dati del Gateway Dragino verranno visualizzati qui sotto.")
+st_folium(m, width=1000, height=500)
