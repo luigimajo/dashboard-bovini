@@ -22,8 +22,14 @@ def save_polygon(coords):
 def load_polygon():
     c.execute("SELECT coords FROM recinto WHERE id = 1")
     row = c.fetchone()
-    return json.loads(row) if row else []
-
+    if row:
+        # row[0] contiene la stringa JSON, ci assicuriamo che sia trattata come tale
+        try:
+            return json.loads(str(row[0]))
+        except:
+            return []
+    return []
+    
 def is_inside(lat, lon, polygon_coords):
     if len(polygon_coords) < 3: return True
     # Shapely vuole (lon, lat) o (lat, lon) coerenti; usiamo (lat, lon)
@@ -53,17 +59,23 @@ with col1:
         folium.Polygon(locations=saved_coords, color="yellow", fill=True, fill_opacity=0.1, popup="Recinto Pascolo").add_to(m)
 
     # Marker per ogni Bovino nella lista
-    for index, row in df_mandria.iterrows():
-        color = 'green' if row['batteria'] > 3.7 else 'orange'
-        if saved_coords and not is_inside(row['lat'], row['lon'], saved_coords):
-            color = 'red' # Allarme fuori recinto
-        
-        folium.Marker(
-            location=[row['lat'], row['lon']],
-            popup=f"Bovino: {row['nome']}<br>Batt: {row['batteria']}V",
-            tooltip=row['nome'],
-            icon=folium.Icon(color=color, icon='cow', prefix='fa') # Icona mucca (richiede FontAwesome)
-        ).add_to(m)
+   for index, row in df_mandria.iterrows():
+    # Determina colore in base a batteria e recinto
+    current_lat = row['lat']
+    current_lon = row['lon']
+    
+    marker_color = 'green' if row['batteria'] > 3.7 else 'orange'
+    
+    if saved_coords and len(saved_coords) >= 3:
+        if not is_inside(current_lat, current_lon, saved_coords):
+            marker_color = 'red' # Allarme fuori recinto
+    
+    folium.Marker(
+        location=[current_lat, current_lon],
+        popup=f"Bovino: {row['nome']}<br>Batt: {row['batteria']}V",
+        tooltip=row['nome'],
+        icon=folium.Icon(color=marker_color, icon='info-sign') 
+    ).add_to(m)
 
     # Strumenti di disegno
     draw = Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'circlemarker':False,'polygon':True})
