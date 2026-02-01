@@ -1,10 +1,68 @@
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
+from folium.plugins import Draw
+from shapely.geometry import Point, Polygon
 import sqlite3
-import requests
 import pandas as pd
-from geopy.distance import geodesic
+
+# --- LOGICA GEOFENCE POLIGONALE ---
+def is_inside(lat, lon, polygon_coords):
+    if len(polygon_coords) < 3: return True # Se non c'è poligono, non dare allarme
+    poly = Polygon(polygon_coords)
+    point = Point(lat, lon)
+    return poly.contains(point)
+
+st.title("🚜 Monitoraggio Pascoli con Geofencing")
+
+# Layout
+col1, col2 = st.columns([3, 1])
+
+with col1:
+    st.subheader("Disegna o Modifica il Recinto")
+    st.info("Usa l'icona del poligono a sinistra per disegnare i confini del pascolo.")
+    
+    # Mappa Satellitare
+    m = folium.Map(location=[45.1743, 9.2394], zoom_start=15)
+    folium.TileLayer(
+        tiles='https://server.arcgisonline.com{z}/{y}/{x}',
+        attr='Esri World Imagery', name='Satellite'
+    ).add_to(m)
+
+    # Aggiunge strumenti di disegno
+    draw = Draw(
+        export=True,
+        draw_options={
+            'polyline': False, 'rectangle': False, 'circle': False, 
+            'marker': False, 'circlemarker': False, 'polygon': True
+        }
+    )
+    draw.add_to(m)
+
+    # Mostra mappa e cattura dati del disegno
+    output = st_folium(m, width=900, height=600)
+
+# --- RECUPERO COORDINATE DISEGNATE ---
+polygon_coords = []
+if output and output['all_drawings']:
+    # Prende l'ultimo poligono disegnato
+    last_draw = output['all_drawings'][-1]
+    if last_draw['geometry']['type'] == 'Polygon':
+        polygon_coords = [(p[1], p[0]) for p in last_draw['geometry']['coordinates'][0]]
+        st.sidebar.success("✅ Recinto acquisito correttamente!")
+
+# --- VERIFICA BOVINI ---
+# Esempio test
+bov_lat, bov_lon = 45.1760, 9.2410 
+if polygon_coords:
+    if not is_inside(bov_lat, bov_lon, polygon_coords):
+        st.error("🚨 ALLARME: Bovino fuori dal poligono disegnato!")
+        if st.button("🔔 Invia Allarme Telegram"):
+             # Qui richiami la tua funzione invia_telegram()
+             pass
+    else:
+        st.success("✅ Bovino all'interno del perimetro.")
+
 
 # --- CONFIGURAZIONE INIZIALE ---
 st.set_page_config(page_title="Monitoraggio Bovini 2026", layout="wide")
