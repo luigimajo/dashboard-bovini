@@ -122,3 +122,19 @@ else:
     st.warning("Nessun bovino registrato. Usa la barra laterale per iniziare.")
 
 st.info("Configurazione: Streamlit + SQLite + Telegram Bot. In attesa dei nuovi tracker.")
+# --- PORTA D'INGRESSO PER DATI REALI (API) ---
+# Questa parte permette di ricevere dati dall'esterno e aggiornare il database
+if "update" in st.query_params:
+    try:
+        dev_id = st.query_params["id"]
+        lat_val = float(st.query_params["lat"])
+        lon_val = float(st.query_params["lon"])
+        batt_val = float(st.query_params["batt"])
+        
+        # Aggiorna il database con i dati ricevuti
+        c.execute("UPDATE mandria SET lat=?, lon=?, batteria=?, stato=? WHERE id=?", 
+                  (lat_val, lon_val, batt_val, "Attivo", dev_id))
+        conn.commit()
+        st.write(f"Dato ricevuto per {dev_id}: {lat_val}, {lon_val}")
+    except Exception as e:
+        st.error(f"Errore aggiornamento API: {e}")
