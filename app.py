@@ -12,28 +12,35 @@ st.set_page_config(page_title="Monitoraggio Bovini 2026", layout="wide")
 # Funzione per inviare allarmi Telegram (Sicura)
 def invia_telegram(msg):
     try:
-        # Recuperiamo i segreti
-        token = str(st.secrets["TELEGRAM_TOKEN"]).strip()
-        chat_id = str(st.secrets["TELEGRAM_CHAT_ID"]).strip()
+        # Recupero pulito
+        tkn = str(st.secrets["TELEGRAM_TOKEN"]).strip()
+        cid = str(st.secrets["TELEGRAM_CHAT_ID"]).strip()
         
-        # Pulizia: se per caso il token inizia già con 'bot', lo togliamo per non duplicarlo
-        if token.lower().startswith('bot'):
-            token = token[3:]
-            
-        # Costruiamo l'URL pezzo per pezzo per essere sicuri delle barre
-        url = "https://api.telegram.org" + token + "/sendMessage"
+        # Rimuoviamo eventuali prefissi 'bot' se inseriti per errore
+        clean_token = tkn.replace("bot", "")
         
-        params = {"chat_id": chat_id, "text": msg}
-        response = requests.get(url, params=params, timeout=10)
+        # COSTRUZIONE URL ATOMICA (le barre sono inserite esplicitamente)
+        api_url = "https://api.telegram.org" + clean_token + "/sendMessage"
+        
+        payload = {
+            "chat_id": cid,
+            "text": msg,
+            "parse_mode": "HTML"
+        }
+        
+        # Invio con timeout
+        response = requests.post(api_url, data=payload, timeout=15)
         
         if response.status_code == 200:
             return True
         else:
-            st.error(f"Errore da Telegram: {response.text}")
+            st.error(f"Telegram dice: {response.status_code} - {response.text}")
             return False
+            
     except Exception as e:
-        st.error(f"Errore tecnico: {e}")
+        st.error(f"Errore critico URL: {e}")
         return False
+
 
 # --- GESTIONE DATABASE ---
 conn = sqlite3.connect('bovini.db', check_same_thread=False)
