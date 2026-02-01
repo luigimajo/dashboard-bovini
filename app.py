@@ -20,7 +20,7 @@ def invia_telegram(msg):
         clean_token = tkn.replace("bot", "")
         
         # COSTRUZIONE URL ATOMICA (le barre sono inserite esplicitamente)
-        api_url = "https://api.telegram.org/" + clean_token + "/sendMessage"
+        api_url = "https://api.telegram.org/bot" + clean_token + "/sendMessage"
         
         payload = {
             "chat_id": cid,
