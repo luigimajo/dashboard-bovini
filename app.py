@@ -19,7 +19,9 @@ st.sidebar.success("Dragino LPS8N: ONLINE")
 # Creazione Mappa Satellitare
 st.subheader("Mappa Satellitare Pascoli")
 # Coordinate di partenza (Pavia - potrai cambiarle)
-m = folium.Map(location=[45.17, 9.23], zoom_start=15, tiles='https://mt1.google.com{x}&y={y}&z={z}', attr='Google')
+# Sostituisci la riga 'm = folium.Map...' con questa:
+m = folium.Map(location=[45.17, 9.23], zoom_start=15, tiles='https://server.arcgisonline.com{z}/{y}/{x}', attr='Esri')
+
 
 # Aggiungiamo un marker di esempio
 folium.Marker(
