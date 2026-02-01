@@ -4,124 +4,94 @@ from streamlit_folium import st_folium
 from folium.plugins import Draw
 from shapely.geometry import Point, Polygon
 import sqlite3
+import json
 import pandas as pd
 
-# --- LOGICA GEOFENCE POLIGONALE ---
+# --- DATABASE ---
+conn = sqlite3.connect('bovini.db', check_same_thread=False)
+c = conn.cursor()
+# Tabella mandria
+c.execute('CREATE TABLE IF NOT EXISTS mandria (id TEXT PRIMARY KEY, nome TEXT, lat REAL, lon REAL, batteria REAL, stato TEXT)')
+# Tabella per il recinto (salviamo il poligono come stringa JSON)
+c.execute('CREATE TABLE IF NOT EXISTS recinto (id INTEGER PRIMARY KEY, coords TEXT)')
+conn.commit()
+
+# --- FUNZIONI ---
+def save_polygon(coords):
+    c.execute("INSERT OR REPLACE INTO recinto (id, coords) VALUES (1, ?)", (json.dumps(coords),))
+    conn.commit()
+
+def load_polygon():
+    c.execute("SELECT coords FROM recinto WHERE id = 1")
+    row = c.fetchone()
+    return json.loads(row[0]) if row else []
+
 def is_inside(lat, lon, polygon_coords):
-    if len(polygon_coords) < 3: return True # Se non c'è poligono, non dare allarme
+    if len(polygon_coords) < 3: return True
     poly = Polygon(polygon_coords)
-    point = Point(lat, lon)
-    return poly.contains(point)
+    return poly.contains(Point(lat, lon))
 
-st.title("🚜 Monitoraggio Pascoli con Geofencing")
+# --- INTERFACCIA ---
+st.title("🚜 Dashboard Pascoli - Geofencing Permanente")
 
-# Layout
+# Carica recinto salvato
+saved_coords = load_polygon()
+
 col1, col2 = st.columns([3, 1])
 
 with col1:
-    st.subheader("Disegna o Modifica il Recinto")
-    st.info("Usa l'icona del poligono a sinistra per disegnare i confini del pascolo.")
-    
-    # Mappa Satellitare
     m = folium.Map(location=[45.1743, 9.2394], zoom_start=15)
     folium.TileLayer(
         tiles='https://server.arcgisonline.com{z}/{y}/{x}',
-        attr='Esri World Imagery', name='Satellite'
+        attr='Esri', name='Satellite'
     ).add_to(m)
 
-    # Aggiunge strumenti di disegno
-    draw = Draw(
-        export=True,
-        draw_options={
-            'polyline': False, 'rectangle': False, 'circle': False, 
-            'marker': False, 'circlemarker': False, 'polygon': True
-        }
-    )
-    draw.add_to(m)
+    # Disegna il recinto salvato se esiste
+    if saved_coords:
+        folium.Polygon(locations=saved_coords, color="yellow", fill=True, fill_opacity=0.1).add_to(m)
 
-    # Mostra mappa e cattura dati del disegno
+    # Strumenti di disegno
+    draw = Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'circlemarker':False,'polygon':True})
+    draw.add_to(m)
+    
     output = st_folium(m, width=900, height=600)
 
-# --- RECUPERO COORDINATE DISEGNATE ---
-polygon_coords = []
-if output and output['all_drawings']:
-    # Prende l'ultimo poligono disegnato
-    last_draw = output['all_drawings'][-1]
-    if last_draw['geometry']['type'] == 'Polygon':
-        polygon_coords = [(p[1], p[0]) for p in last_draw['geometry']['coordinates'][0]]
-        st.sidebar.success("✅ Recinto acquisito correttamente!")
-
-# --- VERIFICA BOVINI ---
-# Esempio test
-bov_lat, bov_lon = 45.1760, 9.2410 
-if polygon_coords:
-    if not is_inside(bov_lat, bov_lon, polygon_coords):
-        st.error("🚨 ALLARME: Bovino fuori dal poligono disegnato!")
-        if st.button("🔔 Invia Allarme Telegram"):
-             # Qui richiami la tua funzione invia_telegram()
-             pass
-    else:
-        st.success("✅ Bovino all'interno del perimetro.")
-
-
-# --- CONFIGURAZIONE INIZIALE ---
-st.set_page_config(page_title="Monitoraggio Bovini 2026", layout="wide")
-
-# Funzione per inviare allarmi Telegram (Sicura)
-def invia_telegram(msg):
-    try:
-        # Recupero pulito
-        tkn = str(st.secrets["TELEGRAM_TOKEN"]).strip()
-        cid = str(st.secrets["TELEGRAM_CHAT_ID"]).strip()
-        
-        # Rimuoviamo eventuali prefissi 'bot' se inseriti per errore
-        clean_token = tkn.replace("bot", "")
-        
-        # COSTRUZIONE URL ATOMICA (le barre sono inserite esplicitamente)
-        api_url = "https://api.telegram.org/bot" + clean_token + "/sendMessage"
-        
-        payload = {
-            "chat_id": cid,
-            "text": msg,
-            "parse_mode": "HTML"
-        }
-        
-        # Invio con timeout
-        response = requests.post(api_url, data=payload, timeout=15)
-        
-        if response.status_code == 200:
-            return True
-        else:
-            st.error(f"Telegram dice: {response.status_code} - {response.text}")
-            return False
+with col2:
+    st.subheader("⚙️ Configurazione")
+    
+    # Logica per catturare il nuovo disegno
+    new_coords = []
+    if output and output['all_drawings']:
+        last_draw = output['all_drawings'][-1]
+        if last_draw['geometry']['type'] == 'Polygon':
+            # Converte formato GeoJSON [lon, lat] in Folium [lat, lon]
+            raw_coords = last_draw['geometry']['coordinates'][0]
+            new_coords = [[p[1], p[0]] for p in raw_coords]
             
-    except Exception as e:
-        st.error(f"Errore critico URL: {e}")
-        return False
+            if st.button("💾 Salva Questi Confini"):
+                save_polygon(new_coords)
+                st.success("Recinto salvato nel Database!")
+                st.rerun()
 
+    if st.button("🗑️ Rimuovi Recinto"):
+        c.execute("DELETE FROM recinto WHERE id = 1")
+        conn.commit()
+        st.rerun()
 
-# --- GESTIONE DATABASE ---
-conn = sqlite3.connect('bovini.db', check_same_thread=False)
-c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS mandria 
-             (id TEXT PRIMARY KEY, nome TEXT, lat REAL, lon REAL, batteria REAL, stato TEXT)''')
-conn.commit()
+# --- MONITORAGGIO ---
+st.write("---")
+# Simulazione (Sostituire con dati dal DB quando pronti i tracker)
+bov_lat, bov_lon = 45.1760, 9.2410 
 
-# --- SIDEBAR: GESTIONE ---
-st.sidebar.title("🐂 Gestione Mandria")
+current_fence = new_coords if new_coords else saved_coords
 
-# Aggiunta Bovino
-with st.sidebar.expander("➕ Registra Nuovo Capo"):
-    n_id = st.text_input("ID Tracker (DevEUI)")
-    n_nome = st.text_input("Nome Animale")
-    if st.button("Salva nel Database"):
-        try:
-            c.execute("INSERT INTO mandria VALUES (?, ?, ?, ?, ?, ?)", 
-                      (n_id, n_nome, 45.1743, 9.2394, 4.2, "In attesa"))
-            conn.commit()
-            st.success(f"{n_nome} registrato!")
-        except:
-            st.error("Errore: ID già esistente.")
+if current_fence:
+    if not is_inside(bov_lat, bov_lon, current_fence):
+        st.error(f"🚨 ALLARME: Bovino FUORI dai confini salvati!")
+    else:
+        st.success("✅ Bovino all'interno del pascolo.")
+else:
+    st.warning("Nessun recinto definito. Disegnalo sulla mappa e clicca 'Salva'.")
 
 # Configurazione Recinto
 st.sidebar.subheader("📍 Recinto Virtuale")
