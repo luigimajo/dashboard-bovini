@@ -11,115 +11,88 @@ import requests
 # --- DATABASE ---
 conn = sqlite3.connect('bovini.db', check_same_thread=False)
 c = conn.cursor()
-
-# Creazione tabelle e aggiornamento colonne
 c.execute('CREATE TABLE IF NOT EXISTS mandria (id TEXT PRIMARY KEY, nome TEXT, lat REAL, lon REAL, batteria REAL, stato_recinto TEXT)')
 c.execute('CREATE TABLE IF NOT EXISTS recinto (id INTEGER PRIMARY KEY, coords TEXT)')
 try:
     c.execute('ALTER TABLE mandria ADD COLUMN stato_recinto TEXT')
-except:
-    pass 
+except: pass 
 conn.commit()
 
-# --- FUNZIONI CORE ---
+# --- FUNZIONI ---
 def invia_telegram(msg):
     try:
         token = st.secrets["TELEGRAM_TOKEN"].strip()
         chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
-        url = f"https://api.telegram.org{token}/sendMessage"
-        requests.get(url, params={"chat_id": chat_id, "text": msg}, timeout=10)
-    except:
-        pass
-
-def save_polygon(coords):
-    c.execute("INSERT OR REPLACE INTO recinto (id, coords) VALUES (1, ?)", (json.dumps(coords),))
-    conn.commit()
-
-def load_polygon():
-    c.execute("SELECT coords FROM recinto WHERE id = 1")
-    row = c.fetchone()
-    if row:
-        try:
-            return json.loads(row[0])
-        except: return []
-    return []
+        requests.get(f"https://api.telegram.org{token}/sendMessage", params={"chat_id": chat_id, "text": msg}, timeout=10)
+    except: pass
 
 def is_inside(lat, lon, polygon_coords):
     if not polygon_coords or len(polygon_coords) < 3: return True
-    try:
-        poly = Polygon(polygon_coords)
-        return poly.contains(Point(lat, lon))
+    try: return Polygon(polygon_coords).contains(Point(lat, lon))
     except: return True
 
 # --- INTERFACCIA ---
-st.set_page_config(page_title="Monitoraggio Bovini 2026", layout="wide")
-st.title("🚜 Dashboard Pascoli - Satellite & Allarmi")
+st.set_page_config(page_title="Monitoraggio Bovini", layout="wide")
+st.title("🚜 Gestione Pascoli e Mandria")
 
-saved_coords = load_polygon()
+# Carica dati
+c.execute("SELECT coords FROM recinto WHERE id = 1")
+res = c.fetchone()
+saved_coords = json.loads(res[0]) if res else []
 df_mandria = pd.read_sql_query("SELECT * FROM mandria", conn)
 
 col1, col2 = st.columns([3, 1])
 
 with col1:
-    map_center = [45.1743, 9.2394]
-    if not df_mandria.empty:
-        map_center = [df_mandria['lat'].mean(), df_mandria['lon'].mean()]
+    # Selezione Mappa
+    map_type = st.radio("Tipo Mappa", ["Satellite", "Stradale"], horizontal=True)
+    tiles = 'https://server.arcgisonline.com{z}/{y}/{x}' if map_type == "Satellite" else 'OpenStreetMap'
+    attr = 'Esri' if map_type == "Satellite" else 'OpenStreetMap'
+
+    m = folium.Map(location=[45.1743, 9.2394], zoom_start=15, tiles=tiles, attr=attr)
     
-    m = folium.Map(location=map_center, zoom_start=15, tiles=None)
-    folium.TileLayer(
-        tiles='https://server.arcgisonline.com{z}/{y}/{x}', 
-        attr='Esri World Imagery', name='Satellite', overlay=False
-    ).add_to(m)
-
     if saved_coords:
-        folium.Polygon(locations=saved_coords, color="yellow", fill=True, fill_opacity=0.15).add_to(m)
+        folium.Polygon(locations=saved_coords, color="yellow", fill=True, fill_opacity=0.1).add_to(m)
 
-    for index, row in df_mandria.iterrows():
-        b_lat, b_lon = row['lat'], row['lon']
-        nuovo_stato = "DENTRO" if is_inside(b_lat, b_lon, saved_coords) else "FUORI"
-        stato_prec = row['stato_recinto'] if row['stato_recinto'] else "DENTRO"
+    for _, row in df_mandria.iterrows():
+        stato = "DENTRO" if is_inside(row['lat'], row['lon'], saved_coords) else "FUORI"
+        if row['stato_recinto'] == "DENTRO" and stato == "FUORI":
+            invia_telegram(f"🚨 {row['nome']} è USCITO dal recinto!")
+        c.execute("UPDATE mandria SET stato_recinto = ? WHERE id = ?", (stato, row['id']))
+        conn.commit()
         
-        if stato_prec == "DENTRO" and nuovo_stato == "FUORI":
-            invia_telegram(f"🚨 ALLARME: {row['nome']} è USCITO dal recinto!")
-        
-        if stato_prec != nuovo_stato:
-            c.execute("UPDATE mandria SET stato_recinto = ? WHERE id = ?", (nuovo_stato, row['id']))
-            conn.commit()
-
-        color = 'green' if nuovo_stato == "DENTRO" else 'red'
-        folium.Marker(
-            location=[b_lat, b_lon],
-            popup=f"{row['nome']} ({row['batteria']}V)",
-            icon=folium.Icon(color=color, icon='info-sign')
-        ).add_to(m)
+        folium.Marker([row['lat'], row['lon']], popup=row['nome'], icon=folium.Icon(color='green' if stato=="DENTRO" else 'red')).add_to(m)
 
     draw = Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'circlemarker':False,'polygon':True})
     draw.add_to(m)
-    output = st_folium(m, width=900, height=550, key="map_v3")
+    output = st_folium(m, width=900, height=550, key="v4")
 
 with col2:
-    st.subheader("⚙️ Gestione")
-    
-    if output and output['all_drawings']:
-        last_draw = output['all_drawings'][-1]
-        if last_draw['geometry']['type'] == 'Polygon':
-            raw_coords = last_draw['geometry']['coordinates'][0]
-            # Inversione [lon, lat] -> [lat, lon] per Folium
-            new_coords = [[p[1], p[0]] for p in raw_coords]
+    st.subheader("⚙️ Azioni")
+    if output and output.get('all_drawings'):
+        last = output['all_drawings'][-1]
+        if last['geometry']['type'] == 'Polygon':
+            coords = [[p[1], p[0]] for p in last['geometry']['coordinates'][0]]
             if st.button("💾 Salva Recinto"):
-                save_polygon(new_coords)
-                st.success("Recinto Salvato!")
+                c.execute("INSERT OR REPLACE INTO recinto (id, coords) VALUES (1, ?)", (json.dumps(coords),))
+                conn.commit()
                 st.rerun()
 
     if st.button("🗑️ Elimina Recinto"):
-        c.execute("DELETE FROM recinto WHERE id = 1")
-        conn.commit()
-        st.success("Recinto eliminato")
-        st.rerun()
-    
+        c.execute("DELETE FROM recinto WHERE id = 1"); conn.commit(); st.rerun()
+
     st.write("---")
+    st.subheader("❌ Rimuovi Bovino")
     if not df_mandria.empty:
-        st.dataframe(df_mandria[['nome', 'batteria', 'stato_recinto']], use_container_width=True)
+        selezionato = st.selectbox("Seleziona capo da eliminare", df_mandria['nome'].tolist())
+        if st.button("Conferma eliminazione"):
+            c.execute("DELETE FROM mandria WHERE nome = ?", (selezionato,))
+            conn.commit()
+            st.rerun()
+
+st.write("---")
+st.subheader("📋 Stato Mandria")
+st.dataframe(df_mandria[['nome', 'batteria', 'stato_recinto']], use_container_width=True)
 
 with st.sidebar:
     st.header("➕ Nuovo Bovino")
@@ -127,5 +100,4 @@ with st.sidebar:
     nome_t = st.text_input("Nome")
     if st.button("Aggiungi"):
         c.execute("INSERT OR REPLACE INTO mandria VALUES (?, ?, ?, ?, ?, ?)", (id_t, nome_t, 45.1743, 9.2394, 4.2, "DENTRO"))
-        conn.commit()
-        st.rerun()
+        conn.commit(); st.rerun()
