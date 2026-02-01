@@ -12,18 +12,27 @@ st.set_page_config(page_title="Monitoraggio Bovini 2026", layout="wide")
 # Funzione per inviare allarmi Telegram (Sicura)
 def invia_telegram(msg):
     try:
-        # Preleviamo il contenuto usando i nomi delle etichette (chiavi)
-        # NON inserire i numeri qui, il codice li prenderà dai Secrets
-        token = st.secrets["TELEGRAM_TOKEN"]
-        chat_id = st.secrets["TELEGRAM_CHAT_ID"]
+        # Recuperiamo i segreti
+        token = str(st.secrets["TELEGRAM_TOKEN"]).strip()
+        chat_id = str(st.secrets["TELEGRAM_CHAT_ID"]).strip()
         
-        url = f"https://api.telegram.org{token}/sendMessage"
+        # Pulizia: se per caso il token inizia già con 'bot', lo togliamo per non duplicarlo
+        if token.lower().startswith('bot'):
+            token = token[3:]
+            
+        # Costruiamo l'URL pezzo per pezzo per essere sicuri delle barre
+        url = "https://api.telegram.org" + token + "/sendMessage"
+        
         params = {"chat_id": chat_id, "text": msg}
-        
         response = requests.get(url, params=params, timeout=10)
-        return response.status_code == 200
+        
+        if response.status_code == 200:
+            return True
+        else:
+            st.error(f"Errore da Telegram: {response.text}")
+            return False
     except Exception as e:
-        st.error(f"Errore: {e}")
+        st.error(f"Errore tecnico: {e}")
         return False
 
 # --- GESTIONE DATABASE ---
