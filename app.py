@@ -23,13 +23,11 @@ def is_inside(lat, lon, polygon_coords):
 
 def invia_telegram(msg):
     try:
-        # Prendi i dati dai Secrets di Streamlit
         token = st.secrets["TELEGRAM_TOKEN"].strip()
         chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
-        # URL corretto e verificato
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         resp = requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=10)
-        return resp.json() # Ci serve per vedere l'errore se fallisce
+        return resp.json()
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -39,18 +37,40 @@ res = c.fetchone()
 saved_coords = json.loads(res[0]) if res and res[0] else []
 df_mandria = pd.read_sql_query("SELECT * FROM mandria", conn)
 
+st.set_page_config(layout="wide")
 st.title("🛰️ Monitoraggio Bovini - Satellitare")
 
+# --- SIDEBAR: AGGIUNGI E RIMUOVI ---
+st.sidebar.header("📋 Gestione Mandria")
+
+# Aggiunta
+with st.sidebar.expander("➕ Aggiungi Bovino"):
+    n_id = st.text_input("ID Tracker")
+    n_nome = st.text_input("Nome/Marca")
+    if st.button("Salva"):
+        if n_id and n_nome:
+            c.execute("INSERT OR REPLACE INTO mandria VALUES (?, ?, ?, ?, ?)", (n_id, n_nome, 45.1743, 9.2394, "DENTRO"))
+            conn.commit()
+            st.rerun()
+
+# Rimozione
+if not df_mandria.empty:
+    with st.sidebar.expander("🗑️ Rimuovi Bovino"):
+        bov_da_eliminar = st.selectbox("Seleziona:", df_mandria['nome'].tolist(), key="del_bov")
+        if st.button("Elimina"):
+            c.execute("DELETE FROM mandria WHERE nome=?", (bov_da_eliminar,))
+            conn.commit()
+            st.rerun()
+
+# --- LAYOUT PRINCIPALE ---
 col1, col2 = st.columns([3, 1])
 
 with col2:
     st.subheader("🧪 Test Telegram")
     if st.button("Invia Messaggio di Prova"):
         risultato = invia_telegram("👋 Test connessione dalla Dashboard!")
-        if risultato.get("ok"):
-            st.success("✅ Messaggio inviato con successo!")
-        else:
-            st.error(f"❌ Errore: {risultato.get('description', 'Token o Chat ID errato')}")
+        if risultato.get("ok"): st.success("✅ Inviato!")
+        else: st.error("❌ Errore")
 
     st.write("---")
     st.subheader("📍 Test Movimento")
@@ -61,7 +81,8 @@ with col2:
         
         if st.button("Aggiorna Posizione"):
             c.execute("SELECT stato_recinto FROM mandria WHERE nome=?", (bov_sel,))
-            stato_vecchio = c.fetchone()[0]
+            res_stato = c.fetchone()
+            stato_vecchio = res_stato[0] if res_stato else "DENTRO"
             
             nuovo_in = is_inside(n_lat, n_lon, saved_coords)
             stato_nuovo = "DENTRO" if nuovo_in else "FUORI"
@@ -74,14 +95,10 @@ with col2:
             st.rerun()
 
 with col1:
-    # MAPPA SATELLITARE GOOGLE (Più affidabile di Esri)
     m = folium.Map(location=[45.1743, 9.2394], zoom_start=16)
     folium.TileLayer(
         tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-        attr='Google Satellite',
-        name='Google Satellite',
-        overlay=False,
-        control=False
+        attr='Google Satellite', name='Google Satellite', overlay=False, control=False
     ).add_to(m)
 
     if saved_coords:
@@ -97,8 +114,16 @@ with col1:
 
     if out and out.get('all_drawings'):
         new_poly = out['all_drawings'][-1]['geometry']['coordinates'][0]
-        # Invertiamo le coordinate per il formato Folium [lat, lon]
         fixed_poly = [[p[1], p[0]] for p in new_poly]
-        c.execute("INSERT OR REPLACE INTO recinto (id, coords) VALUES (1, ?)", (json.dumps(fixed_poly),))
-        conn.commit()
-        st.button("Salva Recinto e Ricarica")
+        if st.button("Salva Recinto"):
+            c.execute("INSERT OR REPLACE INTO recinto (id, coords) VALUES (1, ?)", (json.dumps(fixed_poly),))
+            conn.commit()
+            st.rerun()
+
+# --- LISTA BOVINI (SOTTO LA MAPPA) ---
+st.write("---")
+st.subheader(f"📊 Lista Mandria ({len(df_mandria)} capi)")
+if not df_mandria.empty:
+    st.dataframe(df_mandria, use_container_width=True, hide_index=True)
+else:
+    st.info("Nessun bovino in lista.")
