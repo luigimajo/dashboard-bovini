@@ -8,10 +8,12 @@ import json
 import pandas as pd
 import requests
 
-# --- DATABASE AGGIORNATO ---
+# --- CONFIGURAZIONE PAGINA ---
+st.set_page_config(layout="wide", page_title="Monitoraggio Bovini")
+
+# --- DATABASE (Corretto ordine colonne) ---
 conn = sqlite3.connect('bovini.db', check_same_thread=False)
 c = conn.cursor()
-# Aggiunta colonna batteria
 c.execute('''CREATE TABLE IF NOT EXISTS mandria 
              (id TEXT PRIMARY KEY, nome TEXT, lat REAL, lon REAL, stato_recinto TEXT, batteria INTEGER)''')
 c.execute('CREATE TABLE IF NOT EXISTS recinto (id INTEGER PRIMARY KEY, coords TEXT)')
@@ -31,43 +33,45 @@ def invia_telegram(msg):
         requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=10)
     except Exception: pass
 
-# --- CARICAMENTO ---
+# --- CARICAMENTO DATI ---
 c.execute("SELECT coords FROM recinto WHERE id = 1")
 res = c.fetchone()
 saved_coords = json.loads(res[0]) if res and res[0] else []
 df_mandria = pd.read_sql_query("SELECT * FROM mandria", conn)
 
-st.set_page_config(layout="wide", page_title="Gestione Mandria")
-st.title("🐄 Monitoraggio Avanzato Pascolo")
+st.title("🛰️ Sistema Satellitare Bovini")
 
-# --- SIDEBAR: GESTIONE BOVINI ---
+# --- SIDEBAR ---
 st.sidebar.header("➕ Nuovo Bovino")
 with st.sidebar.form("add_form"):
-    new_id = st.text_input("ID Tracker (es. Heltec_01)")
-    new_nome = st.text_input("Nome/Marca Auricolare")
-    if st.form_submit_button("Aggiungi alla Mandria"):
+    new_id = st.text_input("ID Tracker")
+    new_nome = st.text_input("Nome Bovino")
+    if st.form_submit_button("Aggiungi"):
+        # ORDINE CORRETTO: id, nome, lat, lon, stato_recinto, batteria
         c.execute("INSERT OR REPLACE INTO mandria VALUES (?, ?, ?, ?, ?, ?)", 
                   (new_id, new_nome, 45.1743, 9.2394, "DENTRO", 100))
         conn.commit()
         st.rerun()
 
 st.sidebar.write("---")
-st.sidebar.header("🗑️ Rimuovi Bovino")
-if not df_mandria.empty:
-    to_delete = st.sidebar.selectbox("Seleziona da rimuovere:", df_mandria['nome'].tolist())
-    if st.sidebar.button("Elimina Definitivamente"):
-        c.execute("DELETE FROM mandria WHERE nome=?", (to_delete,))
-        conn.commit()
-        st.rerun()
+if st.sidebar.button("🗑️ ELIMINA RECINTO"):
+    c.execute("DELETE FROM recinto WHERE id = 1")
+    conn.commit()
+    st.rerun()
 
-# --- CORPO PRINCIPALE ---
+# --- MAPPA E TABELLA ---
 col1, col2 = st.columns([2, 1])
 
 with col1:
-    # Mappa Satellitare
-    m = folium.Map(location=[45.1743, 9.2394], zoom_start=16)
-    folium.TileLayer(tiles='https://mt1.google.com{x}&y={y}&z={z}', 
-                     attr='Google', name='Google Satellite', overlay=False).add_to(m)
+    # MAPPA SATELLITARE FORZATA (tiles=None + Google)
+    m = folium.Map(location=[45.1743, 9.2394], zoom_start=16, tiles=None)
+    folium.TileLayer(
+        tiles='https://mt1.google.com{x}&y={y}&z={z}',
+        attr='Google Satellite',
+        name='Google Satellite',
+        overlay=False,
+        control=False
+    ).add_to(m)
 
     if saved_coords:
         folium.Polygon(locations=saved_coords, color="yellow", fill=True, fill_opacity=0.1).add_to(m)
@@ -75,48 +79,51 @@ with col1:
     for _, row in df_mandria.iterrows():
         icon_c = 'green' if row['stato_recinto'] == "DENTRO" else 'red'
         folium.Marker([row['lat'], row['lon']], 
-                      popup=f"{row['nome']} - Batt: {row['batteria']}%", 
-                      icon=folium.Icon(color=icon_c, icon='cow', prefix='fa')).add_to(m)
+                      popup=f"{row['nome']} - {row['batteria']}%", 
+                      icon=folium.Icon(color=icon_c)).add_to(m)
 
-    draw = Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True})
-    draw.add_to(m)
-    out = st_folium(m, width=700, height=500, key="main_map")
+    Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
+    
+    out = st_folium(m, width=800, height=550, key="main_map")
 
+    # Logica Salvataggio Recinto
     if out and out.get('all_drawings'):
-        new_coords = out['all_drawings'][-1]['geometry']['coordinates'][0]
-        fixed_coords = [[p[1], p[0]] for p in new_coords]
-        if st.button("Salva questo Nuovo Recinto"):
-            c.execute("INSERT OR REPLACE INTO recinto (id, coords) VALUES (1, ?)", (json.dumps(fixed_coords),))
+        raw_poly = out['all_drawings'][-1]['geometry']['coordinates'][0]
+        # Converte in [lat, lon]
+        fixed_poly = [[p[1], p[0]] for p in raw_poly]
+        if st.button("✅ Conferma Nuovo Recinto"):
+            c.execute("INSERT OR REPLACE INTO recinto (id, coords) VALUES (1, ?)", (json.dumps(fixed_poly),))
             conn.commit()
             st.rerun()
 
 with col2:
     st.subheader("📊 Stato Mandria")
     if not df_mandria.empty:
-        # Tabella formattata con icone batteria
-        display_df = df_mandria.copy()
-        display_df['batteria'] = display_df['batteria'].apply(lambda x: f"🔋 {x}%")
-        st.dataframe(display_df[['nome', 'stato_recinto', 'batteria']], hide_index=True)
+        # Formattazione tabella
+        st.dataframe(df_mandria[['nome', 'stato_recinto', 'batteria']], hide_index=True)
         
         st.write("---")
+        st.subheader("🗑️ Rimuovi")
+        to_del = st.selectbox("Seleziona:", df_mandria['nome'].tolist())
+        if st.button("Elimina Bovino"):
+            c.execute("DELETE FROM mandria WHERE nome=?", (to_del,))
+            conn.commit()
+            st.rerun()
+
+        st.write("---")
         st.subheader("🧪 Simulatore")
-        target = st.selectbox("Muovi:", df_mandria['nome'].tolist())
-        slat = st.slider("Lat", 45.1700, 45.1800, 45.1743, format="%.6f")
-        slon = st.slider("Lon", 9.2300, 9.2450, 9.2394, format="%.6f")
-        sbatt = st.slider("Livello Batteria", 0, 100, 85)
-        
-        if st.button("Invia Update"):
+        target = st.selectbox("Muovi:", df_mandria['nome'].tolist(), key="sim_sel")
+        slat = st.number_input("Lat", value=45.1743, format="%.6f")
+        slon = st.number_input("Lon", value=9.2394, format="%.6f")
+        if st.button("Aggiorna Posizione"):
             c.execute("SELECT stato_recinto FROM mandria WHERE nome=?", (target,))
             vecchio = c.fetchone()[0]
             nuovo_in = is_inside(slat, slon, saved_coords)
             nuovo_stato = "DENTRO" if nuovo_in else "FUORI"
             
             if vecchio == "DENTRO" and nuovo_stato == "FUORI":
-                invia_telegram(f"🚨 ALLARME: {target} è USCITO dal recinto!")
+                invia_telegram(f"🚨 ALLARME: {target} è USCITO!")
             
-            c.execute("UPDATE mandria SET lat=?, lon=?, stato_recinto=?, batteria=? WHERE nome=?", 
-                      (slat, slon, nuovo_stato, sbatt, target))
+            c.execute("UPDATE mandria SET lat=?, lon=?, stato_recinto=? WHERE nome=?", (slat, slon, nuovo_stato, target))
             conn.commit()
             st.rerun()
-    else:
-        st.info("Aggiungi un bovino dalla barra laterale per iniziare.")
