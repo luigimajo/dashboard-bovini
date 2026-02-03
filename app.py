@@ -11,7 +11,8 @@ import requests
 # --- DATABASE ---
 conn = sqlite3.connect('bovini.db', check_same_thread=False)
 c = conn.cursor()
-c.execute('CREATE TABLE IF NOT EXISTS mandria (id TEXT PRIMARY KEY, nome TEXT, lat REAL, lon REAL, stato_recinto TEXT, batteria INTEGER)')
+c.execute('''CREATE TABLE IF NOT EXISTS mandria 
+             (id TEXT PRIMARY KEY, nome TEXT, lat REAL, lon REAL, stato_recinto TEXT, batteria INTEGER)''')
 c.execute('CREATE TABLE IF NOT EXISTS recinto (id INTEGER PRIMARY KEY, coords TEXT)')
 conn.commit()
 
@@ -34,7 +35,8 @@ def invia_telegram(msg):
 # --- LOGICA DATI ---
 c.execute("SELECT coords FROM recinto WHERE id = 1")
 res = c.fetchone()
-saved_coords = json.loads(res) if res and res else []
+# CORREZIONE: res[0] estrae la stringa dalla tupla restituita da SQLite
+saved_coords = json.loads(res[0]) if res and res[0] else []
 df_mandria = pd.read_sql_query("SELECT * FROM mandria", conn)
 
 st.set_page_config(layout="wide")
@@ -76,22 +78,22 @@ with col2:
         bov_sel = st.selectbox("Sposta:", df_mandria['nome'].tolist())
         
         # Etichette a sinistra
-        c_l1, c_i1 = st.columns([1, 4])
+        c_l1, c_i1 = st.columns([1, 3])
         with c_l1: st.write("Lat:")
         with c_i1: n_lat = st.number_input("Lat", value=45.1743, format="%.6f", label_visibility="collapsed")
         
-        c_l2, c_i2 = st.columns([1, 4])
+        c_l2, c_i2 = st.columns([1, 3])
         with c_l2: st.write("Lon:")
         with c_i2: n_lon = st.number_input("Lon", value=9.2394, format="%.6f", label_visibility="collapsed")
         
-        c_l3, c_i3 = st.columns([1, 4])
+        c_l3, c_i3 = st.columns([1, 3])
         with c_l3: st.write("Bat:")
         with c_i3: n_bat = st.number_input("Batteria", value=100, label_visibility="collapsed")
         
         if st.button("Aggiorna Posizione"):
             c.execute("SELECT stato_recinto FROM mandria WHERE nome=?", (bov_sel,))
-            res_stato = c.fetchone()
-            stato_vecchio = res_stato if res_stato else "DENTRO"
+            res_db = c.fetchone()
+            stato_vecchio = res_db[0] if res_db else "DENTRO"
             
             nuovo_in = is_inside(n_lat, n_lon, saved_coords)
             stato_nuovo = "DENTRO" if nuovo_in else "FUORI"
@@ -122,18 +124,17 @@ with col1:
     out = st_folium(m, width=800, height=550, key="main_map")
 
     if out and out.get('all_drawings'):
-        new_poly = out['all_drawings'][-1]['geometry']['coordinates']
-        fixed_poly = [[p, p] for p in new_poly]
+        new_poly = out['all_drawings'][-1]['geometry']['coordinates'][0]
+        fixed_poly = [[p[1], p[0]] for p in new_poly]
         if st.button("Salva Recinto"):
             c.execute("INSERT OR REPLACE INTO recinto (id, coords) VALUES (1, ?)", (json.dumps(fixed_poly),))
             conn.commit()
             st.rerun()
 
-# --- LISTA BOVINI CON ALLINEAMENTO A SINISTRA ---
+# --- LISTA BOVINI ALLINEATA A SINISTRA ---
 st.write("---")
 st.subheader(f"📊 Lista Mandria ({len(df_mandria)} capi)")
 if not df_mandria.empty:
-    # Definiamo la configurazione per allineare tutto a sinistra
     config = {
         "id": st.column_config.TextColumn("ID", alignment="left"),
         "nome": st.column_config.TextColumn("Nome", alignment="left"),
@@ -142,12 +143,6 @@ if not df_mandria.empty:
         "stato_recinto": st.column_config.TextColumn("Stato", alignment="left"),
         "batteria": st.column_config.NumberColumn("Batteria", alignment="left", format="%d%%")
     }
-    
-    st.dataframe(
-        df_mandria, 
-        use_container_width=True, 
-        hide_index=True, 
-        column_config=config
-    )
+    st.dataframe(df_mandria, use_container_width=True, hide_index=True, column_config=config)
 else:
     st.info("Nessun bovino in lista.")
