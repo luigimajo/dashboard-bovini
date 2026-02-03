@@ -75,23 +75,23 @@ with col2:
     if not df_mandria.empty:
         bov_sel = st.selectbox("Sposta:", df_mandria['nome'].tolist())
         
-        # Allineamento etichette a sinistra tramite mini-colonne
-        c_l1, c_i1 = st.columns([1, 3])
+        # Etichette a sinistra
+        c_l1, c_i1 = st.columns([1, 4])
         with c_l1: st.write("Lat:")
         with c_i1: n_lat = st.number_input("Lat", value=45.1743, format="%.6f", label_visibility="collapsed")
         
-        c_l2, c_i2 = st.columns([1, 3])
+        c_l2, c_i2 = st.columns([1, 4])
         with c_l2: st.write("Lon:")
         with c_i2: n_lon = st.number_input("Lon", value=9.2394, format="%.6f", label_visibility="collapsed")
         
-        c_l3, c_i3 = st.columns([1, 3])
+        c_l3, c_i3 = st.columns([1, 4])
         with c_l3: st.write("Bat:")
         with c_i3: n_bat = st.number_input("Batteria", value=100, label_visibility="collapsed")
         
         if st.button("Aggiorna Posizione"):
             c.execute("SELECT stato_recinto FROM mandria WHERE nome=?", (bov_sel,))
             res_stato = c.fetchone()
-            stato_vecchio = res_stato[0] if res_stato else "DENTRO"
+            stato_vecchio = res_stato if res_stato else "DENTRO"
             
             nuovo_in = is_inside(n_lat, n_lon, saved_coords)
             stato_nuovo = "DENTRO" if nuovo_in else "FUORI"
@@ -123,16 +123,31 @@ with col1:
 
     if out and out.get('all_drawings'):
         new_poly = out['all_drawings'][-1]['geometry']['coordinates']
-        fixed_poly = [[p[1], p[0]] for p in new_poly]
+        fixed_poly = [[p, p] for p in new_poly]
         if st.button("Salva Recinto"):
             c.execute("INSERT OR REPLACE INTO recinto (id, coords) VALUES (1, ?)", (json.dumps(fixed_poly),))
             conn.commit()
             st.rerun()
 
-# --- LISTA BOVINI ---
+# --- LISTA BOVINI CON ALLINEAMENTO A SINISTRA ---
 st.write("---")
 st.subheader(f"📊 Lista Mandria ({len(df_mandria)} capi)")
 if not df_mandria.empty:
-    st.dataframe(df_mandria, use_container_width=True, hide_index=True)
+    # Definiamo la configurazione per allineare tutto a sinistra
+    config = {
+        "id": st.column_config.TextColumn("ID", alignment="left"),
+        "nome": st.column_config.TextColumn("Nome", alignment="left"),
+        "lat": st.column_config.NumberColumn("Latitudine", alignment="left", format="%.6f"),
+        "lon": st.column_config.NumberColumn("Longitudine", alignment="left", format="%.6f"),
+        "stato_recinto": st.column_config.TextColumn("Stato", alignment="left"),
+        "batteria": st.column_config.NumberColumn("Batteria", alignment="left", format="%d%%")
+    }
+    
+    st.dataframe(
+        df_mandria, 
+        use_container_width=True, 
+        hide_index=True, 
+        column_config=config
+    )
 else:
     st.info("Nessun bovino in lista.")
