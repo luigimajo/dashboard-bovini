@@ -11,7 +11,6 @@ import requests
 # --- DATABASE ---
 conn = sqlite3.connect('bovini.db', check_same_thread=False)
 c = conn.cursor()
-# Tabella creata con 6 colonne per includere batteria
 c.execute('CREATE TABLE IF NOT EXISTS mandria (id TEXT PRIMARY KEY, nome TEXT, lat REAL, lon REAL, stato_recinto TEXT, batteria INTEGER)')
 c.execute('CREATE TABLE IF NOT EXISTS recinto (id INTEGER PRIMARY KEY, coords TEXT)')
 conn.commit()
@@ -26,7 +25,7 @@ def invia_telegram(msg):
     try:
         token = st.secrets["TELEGRAM_TOKEN"].strip()
         chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        url = f"https://api.telegram.org{token}/sendMessage"
         resp = requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=10)
         return resp.json()
     except Exception as e:
@@ -35,8 +34,7 @@ def invia_telegram(msg):
 # --- LOGICA DATI ---
 c.execute("SELECT coords FROM recinto WHERE id = 1")
 res = c.fetchone()
-# Ripristinato caricamento esatto come da tua richiesta
-saved_coords = json.loads(res[0]) if res and res[0] else []
+saved_coords = json.loads(res) if res and res else []
 df_mandria = pd.read_sql_query("SELECT * FROM mandria", conn)
 
 st.set_page_config(layout="wide")
@@ -45,18 +43,15 @@ st.title("🛰️ Monitoraggio Bovini - Satellitare")
 # --- SIDEBAR: AGGIUNGI E RIMUOVI ---
 st.sidebar.header("📋 Gestione Mandria")
 
-# Aggiunta (Corretta solo per le 6 colonne: id, nome, lat, lon, stato_recinto, batteria)
 with st.sidebar.expander("➕ Aggiungi Bovino"):
     n_id = st.text_input("ID Tracker")
     n_nome = st.text_input("Nome/Marca")
     if st.button("Salva"):
         if n_id and n_nome:
-            # Inseriamo 6 valori per corrispondere alle 6 colonne della tabella
             c.execute("INSERT OR REPLACE INTO mandria VALUES (?, ?, ?, ?, ?, ?)", (n_id, n_nome, 45.1743, 9.2394, "DENTRO", 100))
             conn.commit()
             st.rerun()
 
-# Rimozione
 if not df_mandria.empty:
     with st.sidebar.expander("🗑️ Rimuovi Bovino"):
         bov_da_eliminar = st.selectbox("Seleziona:", df_mandria['nome'].tolist(), key="del_bov")
@@ -79,13 +74,23 @@ with col2:
     st.subheader("📍 Test Movimento")
     if not df_mandria.empty:
         bov_sel = st.selectbox("Sposta:", df_mandria['nome'].tolist())
-        n_lat = st.number_input("Lat", value=45.1743, format="%.6f")
-        n_lon = st.number_input("Lon", value=9.2394, format="%.6f")
+        
+        # Allineamento etichette a sinistra tramite mini-colonne
+        c_l1, c_i1 = st.columns([1, 3])
+        with c_l1: st.write("Lat:")
+        with c_i1: n_lat = st.number_input("Lat", value=45.1743, format="%.6f", label_visibility="collapsed")
+        
+        c_l2, c_i2 = st.columns([1, 3])
+        with c_l2: st.write("Lon:")
+        with c_i2: n_lon = st.number_input("Lon", value=9.2394, format="%.6f", label_visibility="collapsed")
+        
+        c_l3, c_i3 = st.columns([1, 3])
+        with c_l3: st.write("Bat:")
+        with c_i3: n_bat = st.number_input("Batteria", value=100, label_visibility="collapsed")
         
         if st.button("Aggiorna Posizione"):
             c.execute("SELECT stato_recinto FROM mandria WHERE nome=?", (bov_sel,))
             res_stato = c.fetchone()
-            # Ripristinata logica esatta di ieri sera
             stato_vecchio = res_stato[0] if res_stato else "DENTRO"
             
             nuovo_in = is_inside(n_lat, n_lon, saved_coords)
@@ -94,14 +99,14 @@ with col2:
             if stato_vecchio == "DENTRO" and stato_nuovo == "FUORI":
                 invia_telegram(f"🚨 ALLARME: {bov_sel} è USCITO!")
             
-            c.execute("UPDATE mandria SET lat=?, lon=?, stato_recinto=? WHERE nome=?", (n_lat, n_lon, stato_nuovo, bov_sel))
+            c.execute("UPDATE mandria SET lat=?, lon=?, stato_recinto=?, batteria=? WHERE nome=?", (n_lat, n_lon, stato_nuovo, n_bat, bov_sel))
             conn.commit()
             st.rerun()
 
 with col1:
     m = folium.Map(location=[45.1743, 9.2394], zoom_start=16)
     folium.TileLayer(
-        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+        tiles='https://mt1.google.com{x}&y={y}&z={z}',
         attr='Google Satellite', name='Google Satellite', overlay=False, control=False
     ).add_to(m)
 
@@ -117,14 +122,14 @@ with col1:
     out = st_folium(m, width=800, height=550, key="main_map")
 
     if out and out.get('all_drawings'):
-        new_poly = out['all_drawings'][-1]['geometry']['coordinates'][0]
+        new_poly = out['all_drawings'][-1]['geometry']['coordinates']
         fixed_poly = [[p[1], p[0]] for p in new_poly]
         if st.button("Salva Recinto"):
             c.execute("INSERT OR REPLACE INTO recinto (id, coords) VALUES (1, ?)", (json.dumps(fixed_poly),))
             conn.commit()
             st.rerun()
 
-# --- LISTA BOVINI (SOTTO LA MAPPA) ---
+# --- LISTA BOVINI ---
 st.write("---")
 st.subheader(f"📊 Lista Mandria ({len(df_mandria)} capi)")
 if not df_mandria.empty:
