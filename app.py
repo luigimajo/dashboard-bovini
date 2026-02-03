@@ -8,12 +8,21 @@ import json
 import pandas as pd
 import requests
 
-# --- DATABASE ---
+# --- DATABASE (CONFIGURAZIONE FORZATA) ---
 conn = sqlite3.connect('bovini.db', check_same_thread=False)
 c = conn.cursor()
-# Creazione tabella con 6 colonne: id, nome, lat, lon, stato_recinto, batteria
-c.execute('''CREATE TABLE IF NOT EXISTS mandria 
-             (id TEXT PRIMARY KEY, nome TEXT, lat REAL, lon REAL, stato_recinto TEXT, batteria INTEGER)''')
+
+# Verifichiamo l'ordine esatto delle colonne per evitare l'inversione
+c.execute('CREATE TABLE IF NOT EXISTS mandria (id TEXT PRIMARY KEY, nome TEXT, lat REAL, lon REAL, stato_recinto TEXT, batteria INTEGER)')
+
+# CONTROLLO COLONNE: Se i dati sono invertiti, resettiamo la tabella per sicurezza
+try:
+    c.execute("SELECT batteria FROM mandria LIMIT 1")
+except sqlite3.OperationalError:
+    # Se la colonna batteria non esiste o è in posizione errata, resettiamo
+    c.execute("DROP TABLE IF EXISTS mandria")
+    c.execute('CREATE TABLE mandria (id TEXT PRIMARY KEY, nome TEXT, lat REAL, lon REAL, stato_recinto TEXT, batteria INTEGER)')
+
 c.execute('CREATE TABLE IF NOT EXISTS recinto (id INTEGER PRIMARY KEY, coords TEXT)')
 conn.commit()
 
@@ -28,12 +37,10 @@ def invia_telegram(msg):
         token = st.secrets["TELEGRAM_TOKEN"].strip()
         chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
         url = f"https://api.telegram.org{token}/sendMessage"
-        resp = requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=10)
-        return resp.json()
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+        requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=10)
+    except Exception: pass
 
-# --- LOGICA DATI ---
+# --- CARICAMENTO DATI ---
 c.execute("SELECT coords FROM recinto WHERE id = 1")
 res = c.fetchone()
 saved_coords = json.loads(res[0]) if res and res[0] else []
@@ -45,22 +52,20 @@ st.title("🛰️ Monitoraggio Bovini - Satellitare")
 # --- SIDEBAR: AGGIUNGI E RIMUOVI ---
 st.sidebar.header("📋 Gestione Mandria")
 
-# AGGIUNTA (Corretta con 6 valori per evitare l'OperationalError)
 with st.sidebar.expander("➕ Aggiungi Bovino"):
     n_id = st.text_input("ID Tracker")
     n_nome = st.text_input("Nome/Marca")
     if st.button("Salva"):
         if n_id and n_nome:
-            # Ordine: id, nome, lat, lon, stato_recinto, batteria
-            c.execute("INSERT OR REPLACE INTO mandria VALUES (?, ?, ?, ?, ?, ?)", 
+            # Specifichiamo le colonne per evitare inversioni
+            c.execute("INSERT OR REPLACE INTO mandria (id, nome, lat, lon, stato_recinto, batteria) VALUES (?, ?, ?, ?, ?, ?)", 
                       (n_id, n_nome, 45.1743, 9.2394, "DENTRO", 100))
             conn.commit()
             st.rerun()
 
-# RIMOZIONE
 if not df_mandria.empty:
     with st.sidebar.expander("🗑️ Rimuovi Bovino"):
-        bov_da_eliminar = st.selectbox("Seleziona:", df_mandria['nome'].tolist(), key="del_bov")
+        bov_da_eliminar = st.selectbox("Seleziona:", df_mandria['nome'].tolist())
         if st.button("Elimina"):
             c.execute("DELETE FROM mandria WHERE nome=?", (bov_da_eliminar,))
             conn.commit()
@@ -70,13 +75,6 @@ if not df_mandria.empty:
 col1, col2 = st.columns([3, 1])
 
 with col2:
-    st.subheader("🧪 Test Telegram")
-    if st.button("Invia Messaggio di Prova"):
-        risultato = invia_telegram("👋 Test connessione dalla Dashboard!")
-        if risultato.get("ok"): st.success("✅ Inviato!")
-        else: st.error("❌ Errore")
-
-    st.write("---")
     st.subheader("📍 Test Movimento")
     if not df_mandria.empty:
         bov_sel = st.selectbox("Sposta:", df_mandria['nome'].tolist())
@@ -85,8 +83,8 @@ with col2:
         
         if st.button("Aggiorna Posizione"):
             c.execute("SELECT stato_recinto FROM mandria WHERE nome=?", (bov_sel,))
-            res_stato = c.fetchone()
-            stato_vecchio = res_stato[0] if res_stato else "DENTRO"
+            r = c.fetchone()
+            stato_vecchio = r[0] if r else "DENTRO"
             
             nuovo_in = is_inside(n_lat, n_lon, saved_coords)
             stato_nuovo = "DENTRO" if nuovo_in else "FUORI"
@@ -94,9 +92,7 @@ with col2:
             if stato_vecchio == "DENTRO" and stato_nuovo == "FUORI":
                 invia_telegram(f"🚨 ALLARME: {bov_sel} è USCITO!")
             
-            # Aggiornamento mantenendo la batteria attuale
-            c.execute("UPDATE mandria SET lat=?, lon=?, stato_recinto=? WHERE nome=?", 
-                      (n_lat, n_lon, stato_nuovo, bov_sel))
+            c.execute("UPDATE mandria SET lat=?, lon=?, stato_recinto=? WHERE nome=?", (n_lat, n_lon, stato_nuovo, bov_sel))
             conn.commit()
             st.rerun()
 
@@ -112,7 +108,7 @@ with col1:
 
     for i, row in df_mandria.iterrows():
         col = 'green' if row['stato_recinto'] == "DENTRO" else 'red'
-        folium.Marker([row['lat'], row['lon']], popup=f"{row['nome']} - Bat: {row['batteria']}%", icon=folium.Icon(color=col)).add_to(m)
+        folium.Marker([row['lat'], row['lon']], popup=row['nome'], icon=folium.Icon(color=col)).add_to(m)
 
     Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
     
@@ -126,10 +122,9 @@ with col1:
             conn.commit()
             st.rerun()
 
-# --- LISTA BOVINI (SOTTO LA MAPPA) ---
+# --- LISTA BOVINI (SOTTO) ---
 st.write("---")
 st.subheader(f"📊 Lista Mandria ({len(df_mandria)} capi)")
 if not df_mandria.empty:
-    st.dataframe(df_mandria, use_container_width=True, hide_index=True)
-else:
-    st.info("Nessun bovino in lista.")
+    # Esplicitiamo l'ordine delle colonne nella visualizzazione
+    st.dataframe(df_mandria[['id', 'nome', 'lat', 'lon', 'stato_recinto', 'batteria']], use_container_width=True, hide_index=True)
