@@ -11,7 +11,9 @@ import requests
 # --- DATABASE ---
 conn = sqlite3.connect('bovini.db', check_same_thread=False)
 c = conn.cursor()
-c.execute('CREATE TABLE IF NOT EXISTS mandria (id TEXT PRIMARY KEY, nome TEXT, lat REAL, lon REAL, stato_recinto TEXT)')
+# Creazione tabella con 6 colonne: id, nome, lat, lon, stato_recinto, batteria
+c.execute('''CREATE TABLE IF NOT EXISTS mandria 
+             (id TEXT PRIMARY KEY, nome TEXT, lat REAL, lon REAL, stato_recinto TEXT, batteria INTEGER)''')
 c.execute('CREATE TABLE IF NOT EXISTS recinto (id INTEGER PRIMARY KEY, coords TEXT)')
 conn.commit()
 
@@ -25,7 +27,7 @@ def invia_telegram(msg):
     try:
         token = st.secrets["TELEGRAM_TOKEN"].strip()
         chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        url = f"https://api.telegram.org{token}/sendMessage"
         resp = requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=10)
         return resp.json()
     except Exception as e:
@@ -43,17 +45,19 @@ st.title("🛰️ Monitoraggio Bovini - Satellitare")
 # --- SIDEBAR: AGGIUNGI E RIMUOVI ---
 st.sidebar.header("📋 Gestione Mandria")
 
-# Aggiunta
+# AGGIUNTA (Corretta con 6 valori per evitare l'OperationalError)
 with st.sidebar.expander("➕ Aggiungi Bovino"):
     n_id = st.text_input("ID Tracker")
     n_nome = st.text_input("Nome/Marca")
     if st.button("Salva"):
         if n_id and n_nome:
-            c.execute("INSERT OR REPLACE INTO mandria VALUES (?, ?, ?, ?, ?)", (n_id, n_nome, 45.1743, 9.2394, "DENTRO"))
+            # Ordine: id, nome, lat, lon, stato_recinto, batteria
+            c.execute("INSERT OR REPLACE INTO mandria VALUES (?, ?, ?, ?, ?, ?)", 
+                      (n_id, n_nome, 45.1743, 9.2394, "DENTRO", 100))
             conn.commit()
             st.rerun()
 
-# Rimozione
+# RIMOZIONE
 if not df_mandria.empty:
     with st.sidebar.expander("🗑️ Rimuovi Bovino"):
         bov_da_eliminar = st.selectbox("Seleziona:", df_mandria['nome'].tolist(), key="del_bov")
@@ -90,14 +94,16 @@ with col2:
             if stato_vecchio == "DENTRO" and stato_nuovo == "FUORI":
                 invia_telegram(f"🚨 ALLARME: {bov_sel} è USCITO!")
             
-            c.execute("UPDATE mandria SET lat=?, lon=?, stato_recinto=? WHERE nome=?", (n_lat, n_lon, stato_nuovo, bov_sel))
+            # Aggiornamento mantenendo la batteria attuale
+            c.execute("UPDATE mandria SET lat=?, lon=?, stato_recinto=? WHERE nome=?", 
+                      (n_lat, n_lon, stato_nuovo, bov_sel))
             conn.commit()
             st.rerun()
 
 with col1:
     m = folium.Map(location=[45.1743, 9.2394], zoom_start=16)
     folium.TileLayer(
-        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+        tiles='https://mt1.google.com{x}&y={y}&z={z}',
         attr='Google Satellite', name='Google Satellite', overlay=False, control=False
     ).add_to(m)
 
@@ -106,7 +112,7 @@ with col1:
 
     for i, row in df_mandria.iterrows():
         col = 'green' if row['stato_recinto'] == "DENTRO" else 'red'
-        folium.Marker([row['lat'], row['lon']], popup=row['nome'], icon=folium.Icon(color=col)).add_to(m)
+        folium.Marker([row['lat'], row['lon']], popup=f"{row['nome']} - Bat: {row['batteria']}%", icon=folium.Icon(color=col)).add_to(m)
 
     Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
     
