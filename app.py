@@ -11,6 +11,7 @@ import requests
 # --- DATABASE ---
 conn = sqlite3.connect('bovini.db', check_same_thread=False)
 c = conn.cursor()
+# Tabella creata con 6 colonne per includere batteria
 c.execute('CREATE TABLE IF NOT EXISTS mandria (id TEXT PRIMARY KEY, nome TEXT, lat REAL, lon REAL, stato_recinto TEXT, batteria INTEGER)')
 c.execute('CREATE TABLE IF NOT EXISTS recinto (id INTEGER PRIMARY KEY, coords TEXT)')
 conn.commit()
@@ -25,31 +26,54 @@ def invia_telegram(msg):
     try:
         token = st.secrets["TELEGRAM_TOKEN"].strip()
         chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
-        url = f"https://api.telegram.org{token}/sendMessage"
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
         resp = requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=10)
-        return resp.json() 
+        return resp.json()
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
 # --- LOGICA DATI ---
 c.execute("SELECT coords FROM recinto WHERE id = 1")
 res = c.fetchone()
+# Ripristinato caricamento esatto come da tua richiesta
 saved_coords = json.loads(res[0]) if res and res[0] else []
 df_mandria = pd.read_sql_query("SELECT * FROM mandria", conn)
 
 st.set_page_config(layout="wide")
 st.title("🛰️ Monitoraggio Bovini - Satellitare")
 
+# --- SIDEBAR: AGGIUNGI E RIMUOVI ---
+st.sidebar.header("📋 Gestione Mandria")
+
+# Aggiunta (Corretta solo per le 6 colonne: id, nome, lat, lon, stato_recinto, batteria)
+with st.sidebar.expander("➕ Aggiungi Bovino"):
+    n_id = st.text_input("ID Tracker")
+    n_nome = st.text_input("Nome/Marca")
+    if st.button("Salva"):
+        if n_id and n_nome:
+            # Inseriamo 6 valori per corrispondere alle 6 colonne della tabella
+            c.execute("INSERT OR REPLACE INTO mandria VALUES (?, ?, ?, ?, ?, ?)", (n_id, n_nome, 45.1743, 9.2394, "DENTRO", 100))
+            conn.commit()
+            st.rerun()
+
+# Rimozione
+if not df_mandria.empty:
+    with st.sidebar.expander("🗑️ Rimuovi Bovino"):
+        bov_da_eliminar = st.selectbox("Seleziona:", df_mandria['nome'].tolist(), key="del_bov")
+        if st.button("Elimina"):
+            c.execute("DELETE FROM mandria WHERE nome=?", (bov_da_eliminar,))
+            conn.commit()
+            st.rerun()
+
+# --- LAYOUT PRINCIPALE ---
 col1, col2 = st.columns([3, 1])
 
 with col2:
     st.subheader("🧪 Test Telegram")
     if st.button("Invia Messaggio di Prova"):
         risultato = invia_telegram("👋 Test connessione dalla Dashboard!")
-        if risultato.get("ok"):
-            st.success("✅ Messaggio inviato con successo!")
-        else:
-            st.error(f"❌ Errore: {risultato.get('description', 'Token o Chat ID errato')}")
+        if risultato.get("ok"): st.success("✅ Inviato!")
+        else: st.error("❌ Errore")
 
     st.write("---")
     st.subheader("📍 Test Movimento")
@@ -60,8 +84,9 @@ with col2:
         
         if st.button("Aggiorna Posizione"):
             c.execute("SELECT stato_recinto FROM mandria WHERE nome=?", (bov_sel,))
-            res_db = c.fetchone()
-            stato_vecchio = res_db[0] if res_db else "DENTRO"
+            res_stato = c.fetchone()
+            # Ripristinata logica esatta di ieri sera
+            stato_vecchio = res_stato[0] if res_stato else "DENTRO"
             
             nuovo_in = is_inside(n_lat, n_lon, saved_coords)
             stato_nuovo = "DENTRO" if nuovo_in else "FUORI"
@@ -73,31 +98,10 @@ with col2:
             conn.commit()
             st.rerun()
 
-# --- SIDEBAR ---
-st.sidebar.header("📋 Gestione Mandria")
-with st.sidebar.expander("➕ Aggiungi Bovino"):
-    n_id = st.text_input("ID Tracker")
-    n_nome = st.text_input("Nome/Marca")
-    if st.button("Salva"):
-        if n_id and n_nome:
-            # CORREZIONE: Inseriamo esplicitamente le 6 colonne
-            c.execute("INSERT OR REPLACE INTO mandria (id, nome, lat, lon, stato_recinto, batteria) VALUES (?, ?, ?, ?, ?, ?)", 
-                      (n_id, n_nome, 45.1743, 9.2394, "DENTRO", 100))
-            conn.commit()
-            st.rerun()
-
-if not df_mandria.empty:
-    with st.sidebar.expander("🗑️ Rimuovi Bovino"):
-        bov_da_eliminar = st.selectbox("Seleziona da rimuovere:", df_mandria['nome'].tolist())
-        if st.button("Elimina"):
-            c.execute("DELETE FROM mandria WHERE nome=?", (bov_da_eliminar,))
-            conn.commit()
-            st.rerun()
-
 with col1:
     m = folium.Map(location=[45.1743, 9.2394], zoom_start=16)
     folium.TileLayer(
-        tiles='https://mt1.google.com{x}&y={y}&z={z}',
+        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
         attr='Google Satellite', name='Google Satellite', overlay=False, control=False
     ).add_to(m)
 
@@ -120,7 +124,10 @@ with col1:
             conn.commit()
             st.rerun()
 
+# --- LISTA BOVINI (SOTTO LA MAPPA) ---
 st.write("---")
 st.subheader(f"📊 Lista Mandria ({len(df_mandria)} capi)")
 if not df_mandria.empty:
-    st.dataframe(df_mandria[['id', 'nome', 'lat', 'lon', 'stato_recinto', 'batteria']], use_container_width=True, hide_index=True)
+    st.dataframe(df_mandria, use_container_width=True, hide_index=True)
+else:
+    st.info("Nessun bovino in lista.")
