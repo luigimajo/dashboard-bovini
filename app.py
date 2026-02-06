@@ -6,7 +6,7 @@ from shapely.geometry import Point, Polygon
 import json
 import pandas as pd
 import requests
-from sqlalchemy import text # Necessario per evitare l'ArgumentError
+from sqlalchemy import text
 
 # --- DATABASE ---
 conn = st.connection("postgresql", type="sql")
@@ -19,25 +19,26 @@ def is_inside(lat, lon, polygon_coords):
 
 def invia_telegram(msg):
     try:
-        token = st.secrets["TELEGRAM_TOKEN"].strip()
-        chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
+        # Pulizia token e costruzione URL con slash esplicito
+        token = str(st.secrets["TELEGRAM_TOKEN"]).strip().replace("bot", "")
+        chat_id = str(st.secrets["TELEGRAM_CHAT_ID"]).strip()
         url = f"https://api.telegram.org{token}/sendMessage"
         resp = requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=10)
         return resp.json()
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-# --- LOGICA DATI (Con correzione text()) ---
+# --- LOGICA DATI (Fix per l'errore di Hashing) ---
 saved_coords = []
 df_mandria = pd.DataFrame()
 
 try:
-    # Query corretta con text()
-    res_recinto = conn.query(text("SELECT coords FROM recinti WHERE id = 1"), ttl=0)
+    # Usiamo la stringa semplice per .query() per evitare l'errore di hashing
+    res_recinto = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
     if not res_recinto.empty:
         saved_coords = json.loads(res_recinto.iloc[0]['coords'])
     
-    df_mandria = conn.query(text("SELECT * FROM mandria"), ttl=0)
+    df_mandria = conn.query("SELECT * FROM mandria", ttl=0)
 except Exception as e:
     st.error(f"Errore Database: {e}")
 
@@ -52,7 +53,7 @@ with st.sidebar.expander("➕ Aggiungi Bovino"):
     if st.button("Salva"):
         if n_id and n_nome:
             with conn.session as s:
-                # Correzione ArgumentError: uso di text() e parametri corretti
+                # text() va usato solo dentro s.execute()
                 s.execute(
                     text("INSERT INTO mandria (id, nome, lat, lon, stato_recinto, batteria) "
                          "VALUES (:id, :nome, :lat, :lon, :stato, :bat) "
@@ -62,7 +63,7 @@ with st.sidebar.expander("➕ Aggiungi Bovino"):
                 s.commit()
             st.rerun()
 
-# --- LAYOUT PRINCIPALE (Colonna 3:1 come base stabile) ---
+# --- LAYOUT PRINCIPALE ---
 col1, col2 = st.columns([3, 1])
 
 with col2:
@@ -81,7 +82,6 @@ with col2:
         n_lat = st.number_input("Lat", value=45.1743, format="%.6f")
         n_lon = st.number_input("Lon", value=9.2394, format="%.6f")
         if st.button("Aggiorna Posizione"):
-            # Recupero riga specifica
             bov_info = df_mandria[df_mandria['nome'] == bov_sel].iloc[0]
             stato_vecchio = bov_info['stato_recinto']
             nuovo_in = is_inside(n_lat, n_lon, saved_coords)
@@ -97,7 +97,7 @@ with col2:
             st.rerun()
 
 with col1:
-    # MAPPA IDENTICA ALLA TUA VERSIONE FUNZIONANTE
+    # MAPPA ORIGINALE STABILE
     m = folium.Map(location=[45.1743, 9.2394], zoom_start=16)
     folium.TileLayer(
         tiles='https://mt1.google.com{x}&y={y}&z={z}',
@@ -116,7 +116,7 @@ with col1:
 
     if out and out.get('all_drawings'):
         new_poly_raw = out['all_drawings'][-1]['geometry']['coordinates'][0]
-        # Inversione per Folium [p[1], p[0]] come da tua base stabile
+        # Ripristinata inversione precisa [p[1], p[0]] della tua base stabile
         fixed_poly = [[p[1], p[0]] for p in new_poly_raw]
         if st.button("Salva Recinto"):
             with conn.session as s:
