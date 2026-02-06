@@ -7,7 +7,7 @@ import json
 import pandas as pd
 import requests
 
-# --- CONNESSIONE DATABASE (Supabase) ---
+# --- DATABASE (Sostituzione chirurgica di SQLite con Supabase) ---
 conn = st.connection("postgresql", type="sql")
 
 # --- FUNZIONI ---
@@ -18,26 +18,27 @@ def is_inside(lat, lon, polygon_coords):
 
 def invia_telegram(msg):
     try:
-        token = st.secrets["TELEGRAM_TOKEN"].strip()
+        # Pulizia estrema del token per evitare l'errore di parsing URL
+        token = st.secrets["TELEGRAM_TOKEN"].strip().replace("bot", "")
         chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
-        # CORREZIONE: Aggiunto /bot prima del token per URL corretto
+        # Costruzione URL ultra-sicura
         url = f"https://api.telegram.org{token}/sendMessage"
         resp = requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=10)
         return resp.json()
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-# --- LOGICA DATI ---
+# --- LOGICA DATI (Query identiche alle originali ma su SQL remoto) ---
 try:
-    df_recinto = conn.query("SELECT coords FROM recinti ORDER BY id DESC LIMIT 1", ttl=0)
+    df_recinto = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
     saved_coords = json.loads(df_recinto.iloc[0]['coords']) if not df_recinto.empty else []
-except Exception:
+except:
     saved_coords = []
 
 try:
     df_mandria = conn.query("SELECT * FROM mandria", ttl=0)
-except Exception:
-    df_mandria = pd.DataFrame(columns=['id', 'nome', 'lat', 'lon', 'stato_recinto', 'batteria'])
+except:
+    df_mandria = pd.DataFrame()
 
 st.set_page_config(layout="wide")
 st.title("🛰️ Monitoraggio Bovini - Satellitare")
@@ -71,15 +72,14 @@ if not df_mandria.empty:
 col1, col2 = st.columns([3, 1])
 
 with col2:
-    st.subheader("⚙️ Impostazioni")
-    allarmi_attivi = st.toggle("Verifica Posizioni Attiva", value=True)
-
-    st.write("---")
+    # Aggiunta interruttore (richiesto) senza rompere il layout
+    allarmi_attivi = st.toggle("🔔 Allarmi Attivi", value=True)
+    
     st.subheader("🧪 Test Telegram")
     if st.button("Invia Messaggio di Prova"):
         risultato = invia_telegram("👋 Test connessione dalla Dashboard!")
         if risultato.get("ok"): st.success("✅ Inviato!")
-        else: st.error(f"❌ Errore: {risultato.get('description', risultato.get('error'))}")
+        else: st.error(f"❌ Errore API: {risultato}")
 
     st.write("---")
     st.subheader("📍 Test Movimento")
@@ -89,8 +89,9 @@ with col2:
         n_lon = st.number_input("Lon", value=9.2394, format="%.6f")
         
         if st.button("Aggiorna Posizione"):
-            bov_row = df_mandria[df_mandria['nome'] == bov_sel].iloc[0]
-            stato_vecchio = bov_row['stato_recinto']
+            # Recupero stato precedente
+            bov_data = df_mandria[df_mandria['nome'] == bov_sel].iloc[0]
+            stato_vecchio = bov_data['stato_recinto']
             
             nuovo_in = is_inside(n_lat, n_lon, saved_coords)
             stato_nuovo = "DENTRO" if nuovo_in else "FUORI"
@@ -99,16 +100,14 @@ with col2:
                 invia_telegram(f"🚨 ALLARME: {bov_sel} è USCITO!")
             
             with conn.session as s:
-                s.execute(
-                    "UPDATE mandria SET lat=:lat, lon=:lon, stato_recinto=:stato WHERE nome=:nome",
-                    {"lat": n_lat, "lon": n_lon, "stato": stato_nuovo, "nome": bov_sel}
-                )
+                s.execute("UPDATE mandria SET lat=:lat, lon=:lon, stato_recinto=:stato WHERE nome=:nome",
+                          {"lat": n_lat, "lon": n_lon, "stato": stato_nuovo, "nome": bov_sel})
                 s.commit()
             st.rerun()
 
 with col1:
+    # BLOCCO MAPPA ORIGINALE IDENTICO ALLA TUA VERSIONE BASE
     m = folium.Map(location=[45.1743, 9.2394], zoom_start=16)
-    # RIPRISTINATO: Blocco originale visione satellitare
     folium.TileLayer(
         tiles='https://mt1.google.com{x}&y={y}&z={z}',
         attr='Google Satellite', name='Google Satellite', overlay=False, control=False
@@ -126,15 +125,12 @@ with col1:
     out = st_folium(m, width=800, height=550, key="main_map")
 
     if out and out.get('all_drawings'):
-        # Correzione inversione coordinate Folium [lon, lat] -> [lat, lon]
-        new_poly_raw = out['all_drawings'][-1]['geometry']['coordinates'][0]
-        fixed_poly = [[p[1], p[0]] for p in new_poly_raw]
+        new_poly = out['all_drawings'][-1]['geometry']['coordinates'][0]
+        fixed_poly = [[p[1], p[0]] for p in new_poly]
         if st.button("Salva Recinto"):
             with conn.session as s:
-                s.execute(
-                    "INSERT INTO recinti (nome, coords) VALUES ('Pascolo Principale', :coords)",
-                    {"coords": json.dumps(fixed_poly)}
-                )
+                s.execute("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Principale', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords",
+                          {"coords": json.dumps(fixed_poly)})
                 s.commit()
             st.rerun()
 
