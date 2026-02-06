@@ -8,10 +8,10 @@ import pandas as pd
 import requests
 from datetime import datetime
 
-# --- CONNESSIONE DATABASE ---
+# --- CONNESSIONE DATABASE (Supabase) ---
 conn = st.connection("postgresql", type="sql")
 
-# --- FUNZIONI CORE ---
+# --- FUNZIONI ---
 def is_inside(lat, lon, polygon_coords):
     if not polygon_coords or len(polygon_coords) < 3: return True
     poly = Polygon(polygon_coords)
@@ -27,67 +27,46 @@ def invia_telegram(msg):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-# --- INTEGRAZIONE TTN (Dati Reali) ---
-def fetch_ttn_data():
-    """Recupera l'ultimo uplink da TTN Storage Integration"""
-    app_id = st.secrets["TTN_APP_ID"]
-    api_key = st.secrets["TTN_API_KEY"]
-    url = f"https://eu1.cloud.thethings.network{app_id}/packages/storage/uplink_message"
-    headers = {"Authorization": f"Bearer {api_key}", "Accept": "text/event-stream"}
-    
-    try:
-        # Limitiamo la ricerca agli ultimi dati per non sovraccaricare
-        response = requests.get(url, headers=headers, params={"limit": 10, "order": "-received_at"}, timeout=15)
-        if response.status_code == 200:
-            # TTN Storage restituisce oggetti JSON separati da newline
-            lines = response.text.strip().split('\n')
-            for line in reversed(lines):
-                data = json.loads(line)
-                device_id = data["end_device_ids"]["device_id"]
-                payload = data.get("uplink_message", {}).get("decoded_payload", {})
-                
-                lat = payload.get("latitude") or payload.get("lat")
-                lon = payload.get("longitude") or payload.get("lon")
-                bat = payload.get("battery") or payload.get("batt", 100)
-                
-                if lat and lon:
-                    return device_id, lat, lon, bat
-    except Exception as e:
-        st.error(f"Errore TTN: {e}")
-    return None
-
-# --- CARICAMENTO DATI DB ---
+# --- CARICAMENTO DATI ---
 try:
     df_recinti = conn.query("SELECT * FROM recinti", ttl=0)
     df_mandria = conn.query("SELECT * FROM mandria", ttl=0)
-except Exception as e:
-    st.error("Errore di connessione al database. Verifica di aver creato le tabelle su Supabase.")
-    df_recinti = pd.DataFrame()
-    df_mandria = pd.DataFrame()
+except Exception:
+    df_recinti = pd.DataFrame(columns=['id', 'nome', 'coords'])
+    df_mandria = pd.DataFrame(columns=['id', 'nome', 'lat', 'lon', 'stato_recinto', 'batteria', 'ultimo_aggiornamento'])
 
-# Caricamento coordinate (prende il primo se esiste)
+# Recupero coordinate recinto ID=1 (come nel tuo originale)
 saved_coords = []
 if not df_recinti.empty:
-    try:
-        # Prende l'ultimo recinto creato
-        ultimo_recinto = df_recinti.iloc[-1]
-        saved_coords = json.loads(ultimo_recinto['coords'])
-    except:
-        saved_coords = []
+    res = df_recinti[df_recinti['id'] == 1]
+    if not res.empty:
+        saved_coords = json.loads(res.iloc[0]['coords'])
 
-# --- SIDEBAR: GESTIONE ---
+st.set_page_config(layout="wide")
+st.title("🛰️ Monitoraggio Bovini - Satellitare")
+
+# --- SIDEBAR: AGGIUNGI E RIMUOVI ---
 st.sidebar.header("📋 Gestione Mandria")
 
 with st.sidebar.expander("➕ Aggiungi Bovino"):
-    n_id = st.text_input("ID Tracker (es. heltec-v3-01)")
-    n_nome = st.text_input("Nome Bovino")
-    if st.button("Salva Bovino"):
+    n_id = st.text_input("ID Tracker")
+    n_nome = st.text_input("Nome/Marca")
+    if st.button("Salva"):
         if n_id and n_nome:
             with conn.session as s:
                 s.execute(
-                    "INSERT INTO mandria (id, nome, lat, lon, batteria, stato_recinto, allarme_attivo) VALUES (:id, :nome, :lat, :lon, :bat, :stato, :allarme) ON CONFLICT (id) DO UPDATE SET nome = EXCLUDED.nome",
-                    {"id": n_id, "nome": n_nome, "lat": 45.1743, "lon": 9.2394, "bat": 100, "stato": "DENTRO", "allarme": True}
+                    "INSERT INTO mandria (id, nome, lat, lon, stato_recinto, batteria) VALUES (:id, :nome, :lat, :lon, :stato, :bat) ON CONFLICT (id) DO UPDATE SET nome = EXCLUDED.nome",
+                    {"id": n_id, "nome": n_nome, "lat": 45.1743, "lon": 9.2394, "stato": "DENTRO", "bat": 100}
                 )
+                s.commit()
+            st.rerun()
+
+if not df_mandria.empty:
+    with st.sidebar.expander("🗑️ Rimuovi Bovino"):
+        bov_da_eliminar = st.selectbox("Seleziona:", df_mandria['nome'].tolist(), key="del_bov")
+        if st.button("Elimina"):
+            with conn.session as s:
+                s.execute("DELETE FROM mandria WHERE nome=:nome", {"nome": bov_da_eliminar})
                 s.commit()
             st.rerun()
 
@@ -95,78 +74,77 @@ with st.sidebar.expander("➕ Aggiungi Bovino"):
 col1, col2 = st.columns([3, 1])
 
 with col2:
-    st.subheader("⚙️ Controllo Sistema")
-    allarme_globale = st.toggle("Verifica Posizioni Attiva", value=True, help="Disabilita per spostamenti programmati")
+    # --- INTERRUTTORE ALLARMI (Richiesto) ---
+    st.subheader("⚙️ Impostazioni")
+    allarme_globale = st.toggle("Allarmi Telegram Attivi", value=True)
     
-    if st.button("🔄 Sincronizza con TTN"):
-        ttn_res = fetch_ttn_data()
-        if ttn_res:
-            dev_id, t_lat, t_lon, t_bat = ttn_res
-            # Verifica se il device esiste nel nostro DB
-            if dev_id in df_mandria['id'].values:
-                bov_info = df_mandria[df_mandria['id'] == dev_id].iloc[0]
-                vecchio_stato = bov_info['stato_recinto']
-                nuovo_stato = "DENTRO" if is_inside(t_lat, t_lon, saved_coords) else "FUORI"
-                
-                # Logica Allarme
-                if allarme_globale and vecchio_stato == "DENTRO" and nuovo_stato == "FUORI":
-                    invia_telegram(f"🚨 ALLARME TTN: {bov_info['nome']} ({dev_id}) è USCITO!")
-                
-                with conn.session as s:
-                    s.execute(
-                        "UPDATE mandria SET lat=:lat, lon=:lon, batteria=:bat, stato_recinto=:st, ultimo_aggiornamento=NOW() WHERE id=:id",
-                        {"lat": t_lat, "lon": t_lon, "bat": t_bat, "st": nuovo_stato, "id": dev_id}
-                    )
-                    s.commit()
-                st.success(f"Aggiornato: {dev_id}")
-                st.rerun()
-            else:
-                st.warning(f"Device {dev_id} trovato su TTN ma non nel Database locale.")
-        else:
-            st.info("Nessun nuovo dato da TTN negli ultimi minuti.")
+    st.write("---")
+    st.subheader("🧪 Test Telegram")
+    if st.button("Invia Messaggio di Prova"):
+        risultato = invia_telegram("👋 Test connessione dalla Dashboard!")
+        if risultato.get("ok"): st.success("✅ Inviato!")
+        else: st.error("❌ Errore")
 
     st.write("---")
     st.subheader("📍 Test Movimento")
     if not df_mandria.empty:
         bov_sel = st.selectbox("Sposta:", df_mandria['nome'].tolist())
-        n_lat = st.number_input("Lat Test", value=45.1743, format="%.6f")
-        n_lon = st.number_input("Lon Test", value=9.2394, format="%.6f")
-        if st.button("Aggiorna Manuale"):
-            bov_row = df_mandria[df_mandria['nome'] == bov_sel].iloc[0]
+        n_lat = st.number_input("Lat", value=45.1743, format="%.6f")
+        n_lon = st.number_input("Lon", value=9.2394, format="%.6f")
+        
+        if st.button("Aggiorna Posizione"):
+            # Logica stato vecchio/nuovo
+            bov_info = df_mandria[df_mandria['nome'] == bov_sel].iloc[0]
+            stato_vecchio = bov_info['stato_recinto']
+            
             nuovo_in = is_inside(n_lat, n_lon, saved_coords)
             stato_nuovo = "DENTRO" if nuovo_in else "FUORI"
             
-            if allarme_globale and bov_row['stato_recinto'] == "DENTRO" and stato_nuovo == "FUORI":
-                invia_telegram(f"🚨 ALLARME TEST: {bov_sel} è USCITO!")
+            if allarme_globale and stato_vecchio == "DENTRO" and stato_nuovo == "FUORI":
+                invia_telegram(f"🚨 ALLARME: {bov_sel} è USCITO!")
             
             with conn.session as s:
-                s.execute("UPDATE mandria SET lat=:lat, lon=:lon, stato_recinto=:st, ultimo_aggiornamento=NOW() WHERE nome=:n",
-                          {"lat": n_lat, "lon": n_lon, "st": stato_nuovo, "n": bov_sel})
+                s.execute(
+                    "UPDATE mandria SET lat=:lat, lon=:lon, stato_recinto=:stato, ultimo_aggiornamento=NOW() WHERE nome=:nome",
+                    {"lat": n_lat, "lon": n_lon, "stato": stato_nuovo, "nome": bov_sel}
+                )
                 s.commit()
             st.rerun()
 
 with col1:
     m = folium.Map(location=[45.1743, 9.2394], zoom_start=16)
-    folium.TileLayer(tiles='https://mt1.google.com{x}&y={y}&z={z}', attr='Google Satellite', name='Google').add_to(m)
+    # --- VISIONE SATELLITARE GOOGLE (Ripristinata) ---
+    folium.TileLayer(
+        tiles='https://mt1.google.com{x}&y={y}&z={z}',
+        attr='Google Satellite', name='Google Satellite', overlay=False, control=False
+    ).add_to(m)
 
-    for _, r in df_recinti.iterrows():
-        folium.Polygon(locations=json.loads(r['coords']), color="yellow", fill=True, fill_opacity=0.2, popup=r['nome']).add_to(m)
+    if saved_coords:
+        folium.Polygon(locations=saved_coords, color="yellow", weight=5, fill=True, fill_opacity=0.2).add_to(m)
 
-    for _, row in df_mandria.iterrows():
-        color = 'green' if row['stato_recinto'] == "DENTRO" else 'red'
-        folium.Marker([row['lat'], row['lon']], popup=f"{row['nome']} ({row['batteria']}%)", icon=folium.Icon(color=color)).add_to(m)
+    for i, row in df_mandria.iterrows():
+        col = 'green' if row['stato_recinto'] == "DENTRO" else 'red'
+        folium.Marker([row['lat'], row['lon']], popup=row['nome'], icon=folium.Icon(color=col)).add_to(m)
 
-    Draw(draw_options={'polyline':False,'polygon':True}).add_to(m)
-    out = st_folium(m, width=800, height=500, key="main_map")
+    Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
+    
+    out = st_folium(m, width=800, height=550, key="main_map")
 
     if out and out.get('all_drawings'):
-        new_coords = [[p[1], p[0]] for p in out['all_drawings'][-1]['geometry']['coordinates'][0]]
-        nome_rec = st.text_input("Nome Recinto:")
-        if st.button("Salva Recinto") and nome_rec:
+        new_poly = out['all_drawings'][-1]['geometry']['coordinates'][0]
+        fixed_poly = [[p[1], p[0]] for p in new_poly]
+        if st.button("Salva Recinto"):
             with conn.session as s:
-                s.execute("INSERT INTO recinti (nome, coords) VALUES (:n, :c)", {"n": nome_rec, "c": json.dumps(new_coords)})
+                # Salva come ID 1 per mantenere la logica originale
+                s.execute("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Recinto Principale', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords", 
+                          {"coords": json.dumps(fixed_poly)})
                 s.commit()
             st.rerun()
 
-st.subheader("📊 Lista Mandria")
-st.dataframe(df_mandria, use_container_width=True, hide_index=True)
+# --- LISTA MANDRIA (SOTTO LA MAPPA) ---
+st.write("---")
+st.subheader(f"📊 Lista Mandria ({len(df_mandria)} capi)")
+if not df_mandria.empty:
+    st.dataframe(df_mandria, use_container_width=True, hide_index=True)
+else:
+    st.info("Nessun bovino in lista.")
