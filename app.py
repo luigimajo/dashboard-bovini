@@ -7,7 +7,7 @@ import json
 import pandas as pd
 import requests
 
-# --- CONNESSIONE DATABASE ---
+# --- DATABASE (Connessione Supabase) ---
 conn = st.connection("postgresql", type="sql")
 
 # --- FUNZIONI ---
@@ -26,24 +26,21 @@ def invia_telegram(msg):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-# --- LOGICA DATI (Con protezione anti-crash) ---
-saved_coords = []
-df_mandria = pd.DataFrame()
-
+# --- LOGICA DATI (Query protette) ---
 try:
     res_recinto = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
-    if not res_recinto.empty:
-        saved_coords = json.loads(res_recinto.iloc[0]['coords'])
-    
+    saved_coords = json.loads(res_recinto.iloc[0]['coords']) if not res_recinto.empty else []
     df_mandria = conn.query("SELECT * FROM mandria", ttl=0)
-except Exception as e:
-    st.warning("⚠️ Database in fase di connessione o tabelle non pronte.")
+except Exception:
+    saved_coords = []
+    df_mandria = pd.DataFrame(columns=['id', 'nome', 'lat', 'lon', 'stato_recinto', 'batteria'])
 
 st.set_page_config(layout="wide")
 st.title("🛰️ Monitoraggio Bovini - Satellitare")
 
-# --- SIDEBAR ---
+# --- SIDEBAR: AGGIUNGI E RIMUOVI ---
 st.sidebar.header("📋 Gestione Mandria")
+
 with st.sidebar.expander("➕ Aggiungi Bovino"):
     n_id = st.text_input("ID Tracker")
     n_nome = st.text_input("Nome/Marca")
@@ -57,12 +54,22 @@ with st.sidebar.expander("➕ Aggiungi Bovino"):
                 s.commit()
             st.rerun()
 
+if not df_mandria.empty:
+    with st.sidebar.expander("🗑️ Rimuovi Bovino"):
+        bov_da_eliminar = st.selectbox("Seleziona:", df_mandria['nome'].tolist(), key="del_bov")
+        if st.button("Elimina"):
+            with conn.session as s:
+                s.execute("DELETE FROM mandria WHERE nome=:nome", {"nome": bov_da_eliminar})
+                s.commit()
+            st.rerun()
+
 # --- LAYOUT PRINCIPALE ---
 col1, col2 = st.columns([3, 1])
 
 with col2:
+    # Interruttore richiesto
     allarmi_attivi = st.toggle("🔔 Verifica Posizioni Attiva", value=True)
-    st.write("---")
+
     st.subheader("🧪 Test Telegram")
     if st.button("Invia Messaggio di Prova"):
         risultato = invia_telegram("👋 Test connessione dalla Dashboard!")
@@ -75,13 +82,17 @@ with col2:
         bov_sel = st.selectbox("Sposta:", df_mandria['nome'].tolist())
         n_lat = st.number_input("Lat", value=45.1743, format="%.6f")
         n_lon = st.number_input("Lon", value=9.2394, format="%.6f")
+        
         if st.button("Aggiorna Posizione"):
-            bov_info = df_mandria[df_mandria['nome'] == bov_sel].iloc[0]
-            stato_vecchio = bov_info['stato_recinto']
+            bov_row = df_mandria[df_mandria['nome'] == bov_sel].iloc[0]
+            stato_vecchio = bov_row['stato_recinto']
+            
             nuovo_in = is_inside(n_lat, n_lon, saved_coords)
             stato_nuovo = "DENTRO" if nuovo_in else "FUORI"
+            
             if allarmi_attivi and stato_vecchio == "DENTRO" and stato_nuovo == "FUORI":
                 invia_telegram(f"🚨 ALLARME: {bov_sel} è USCITO!")
+            
             with conn.session as s:
                 s.execute("UPDATE mandria SET lat=:lat, lon=:lon, stato_recinto=:stato WHERE nome=:nome",
                           {"lat": n_lat, "lon": n_lon, "stato": stato_nuovo, "nome": bov_sel})
@@ -98,16 +109,17 @@ with col1:
     if saved_coords:
         folium.Polygon(locations=saved_coords, color="yellow", weight=5, fill=True, fill_opacity=0.2).add_to(m)
 
-    if not df_mandria.empty:
-        for i, row in df_mandria.iterrows():
-            col = 'green' if row['stato_recinto'] == "DENTRO" else 'red'
-            folium.Marker([row['lat'], row['lon']], popup=row['nome'], icon=folium.Icon(color=col)).add_to(m)
+    for i, row in df_mandria.iterrows():
+        col = 'green' if row['stato_recinto'] == "DENTRO" else 'red'
+        folium.Marker([row['lat'], row['lon']], popup=row['nome'], icon=folium.Icon(color=col)).add_to(m)
 
     Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
+    
     out = st_folium(m, width=800, height=550, key="main_map")
 
     if out and out.get('all_drawings'):
         new_poly_raw = out['all_drawings'][-1]['geometry']['coordinates'][0]
+        # Ripristinata inversione coordinate originale
         fixed_poly = [[p[1], p[0]] for p in new_poly_raw]
         if st.button("Salva Recinto"):
             with conn.session as s:
