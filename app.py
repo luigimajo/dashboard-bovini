@@ -7,7 +7,7 @@ import json
 import pandas as pd
 import requests
 
-# --- CONNESSIONE DATABASE (Supabase) ---
+# --- CONNESSIONE DATABASE ---
 conn = st.connection("postgresql", type="sql")
 
 # --- FUNZIONI ---
@@ -18,6 +18,10 @@ def is_inside(lat, lon, polygon_coords):
 
 def invia_telegram(msg):
     try:
+        # Verifica esistenza chiavi nei secrets
+        if "TELEGRAM_TOKEN" not in st.secrets:
+            return {"ok": False, "error": "Chiave TELEGRAM_TOKEN mancante nei Secrets"}
+        
         token = st.secrets["TELEGRAM_TOKEN"].strip()
         chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
         url = f"https://api.telegram.org{token}/sendMessage"
@@ -26,12 +30,12 @@ def invia_telegram(msg):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-# --- LOGICA DATI (Corretta per nomi tabelle Supabase) ---
+# --- LOGICA DATI ---
 try:
-    # Cerchiamo nella tabella 'recinti' che hai creato su Supabase
-    df_recinto = conn.query("SELECT coords FROM recinti LIMIT 1", ttl=0)
+    # Carichiamo l'ultimo recinto salvato nella tabella 'recinti'
+    df_recinto = conn.query("SELECT coords FROM recinti ORDER BY id DESC LIMIT 1", ttl=0)
     saved_coords = json.loads(df_recinto.iloc[0]['coords']) if not df_recinto.empty else []
-except Exception:
+except Exception as e:
     saved_coords = []
 
 try:
@@ -42,9 +46,8 @@ except Exception:
 st.set_page_config(layout="wide")
 st.title("🛰️ Monitoraggio Bovini - Satellitare")
 
-# --- SIDEBAR: AGGIUNGI E RIMUOVI ---
+# --- SIDEBAR ---
 st.sidebar.header("📋 Gestione Mandria")
-
 with st.sidebar.expander("➕ Aggiungi Bovino"):
     n_id = st.text_input("ID Tracker")
     n_nome = st.text_input("Nome/Marca")
@@ -58,20 +61,10 @@ with st.sidebar.expander("➕ Aggiungi Bovino"):
                 s.commit()
             st.rerun()
 
-if not df_mandria.empty:
-    with st.sidebar.expander("🗑️ Rimuovi Bovino"):
-        bov_da_eliminar = st.selectbox("Seleziona:", df_mandria['nome'].tolist(), key="del_bov")
-        if st.button("Elimina"):
-            with conn.session as s:
-                s.execute("DELETE FROM mandria WHERE nome=:nome", {"nome": bov_da_eliminar})
-                s.commit()
-            st.rerun()
-
-# --- LAYOUT PRINCIPALE ---
+# --- LAYOUT ---
 col1, col2 = st.columns([3, 1])
 
 with col2:
-    # --- INTERRUTTORE ALLARMI (Richiesto) ---
     st.subheader("⚙️ Impostazioni")
     allarmi_attivi = st.toggle("Verifica Posizioni Attiva", value=True)
 
@@ -88,11 +81,10 @@ with col2:
         bov_sel = st.selectbox("Sposta:", df_mandria['nome'].tolist())
         n_lat = st.number_input("Lat", value=45.1743, format="%.6f")
         n_lon = st.number_input("Lon", value=9.2394, format="%.6f")
-        
         if st.button("Aggiorna Posizione"):
-            bov_row = df_mandria[df_mandria['nome'] == bov_sel]
-            stato_vecchio = bov_row['stato_recinto'].values[0] if not bov_row.empty else "DENTRO"
-            
+            # Logica allarme
+            bov_info = df_mandria[df_mandria['nome'] == bov_sel].iloc[0]
+            stato_vecchio = bov_info['stato_recinto']
             nuovo_in = is_inside(n_lat, n_lon, saved_coords)
             stato_nuovo = "DENTRO" if nuovo_in else "FUORI"
             
@@ -100,16 +92,13 @@ with col2:
                 invia_telegram(f"🚨 ALLARME: {bov_sel} è USCITO!")
             
             with conn.session as s:
-                s.execute(
-                    "UPDATE mandria SET lat=:lat, lon=:lon, stato_recinto=:stato, ultimo_aggiornamento=NOW() WHERE nome=:nome",
-                    {"lat": n_lat, "lon": n_lon, "stato": stato_nuovo, "nome": bov_sel}
-                )
+                s.execute("UPDATE mandria SET lat=:lat, lon=:lon, stato_recinto=:stato WHERE nome=:nome",
+                          {"lat": n_lat, "lon": n_lon, "stato": stato_nuovo, "nome": bov_sel})
                 s.commit()
             st.rerun()
 
 with col1:
     m = folium.Map(location=[45.1743, 9.2394], zoom_start=16)
-    # --- VISIONE SATELLITARE GOOGLE (Ripristinata esattamente) ---
     folium.TileLayer(
         tiles='https://mt1.google.com{x}&y={y}&z={z}',
         attr='Google Satellite', name='Google Satellite', overlay=False, control=False
@@ -123,23 +112,19 @@ with col1:
         folium.Marker([row['lat'], row['lon']], popup=row['nome'], icon=folium.Icon(color=col)).add_to(m)
 
     Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
-    
     out = st_folium(m, width=800, height=550, key="main_map")
 
     if out and out.get('all_drawings'):
+        # Correzione inversione coordinate Folium [lon, lat] -> [lat, lon]
         new_poly_raw = out['all_drawings'][-1]['geometry']['coordinates'][0]
         fixed_poly = [[p[1], p[0]] for p in new_poly_raw]
         if st.button("Salva Recinto"):
             with conn.session as s:
-                # Usiamo la tabella 'recinti' come definita su Supabase
-                s.execute(
-                    "INSERT INTO recinti (nome, coords) VALUES ('Recinto 1', :coords)",
-                    {"coords": json.dumps(fixed_poly)}
-                )
+                s.execute("INSERT INTO recinti (nome, coords) VALUES ('Pascolo Principale', :coords)",
+                          {"coords": json.dumps(fixed_poly)})
                 s.commit()
             st.rerun()
 
-# --- LISTA BOVINI ---
 st.write("---")
-st.subheader(f"📊 Lista Mandria")
+st.subheader("📊 Lista Mandria")
 st.dataframe(df_mandria, use_container_width=True, hide_index=True)
