@@ -7,7 +7,7 @@ import json
 import pandas as pd
 import requests
 
-# --- DATABASE (Supabase) ---
+# --- CONNESSIONE DATABASE (Supabase) ---
 conn = st.connection("postgresql", type="sql")
 
 # --- FUNZIONI ---
@@ -26,9 +26,10 @@ def invia_telegram(msg):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-# --- LOGICA DATI ---
+# --- LOGICA DATI (Corretta per nomi tabelle Supabase) ---
 try:
-    df_recinto = conn.query("SELECT coords FROM recinto WHERE id = 1", ttl=0)
+    # Cerchiamo nella tabella 'recinti' che hai creato su Supabase
+    df_recinto = conn.query("SELECT coords FROM recinti LIMIT 1", ttl=0)
     saved_coords = json.loads(df_recinto.iloc[0]['coords']) if not df_recinto.empty else []
 except Exception:
     saved_coords = []
@@ -70,8 +71,8 @@ if not df_mandria.empty:
 col1, col2 = st.columns([3, 1])
 
 with col2:
-    # --- INTERRUTTORE ALLARMI ---
-    st.subheader("⚙️ Controllo")
+    # --- INTERRUTTORE ALLARMI (Richiesto) ---
+    st.subheader("⚙️ Impostazioni")
     allarmi_attivi = st.toggle("Verifica Posizioni Attiva", value=True)
 
     st.write("---")
@@ -79,7 +80,7 @@ with col2:
     if st.button("Invia Messaggio di Prova"):
         risultato = invia_telegram("👋 Test connessione dalla Dashboard!")
         if risultato.get("ok"): st.success("✅ Inviato!")
-        else: st.error("❌ Errore")
+        else: st.error(f"❌ Errore: {risultato.get('error')}")
 
     st.write("---")
     st.subheader("📍 Test Movimento")
@@ -89,8 +90,8 @@ with col2:
         n_lon = st.number_input("Lon", value=9.2394, format="%.6f")
         
         if st.button("Aggiorna Posizione"):
-            res_stato = df_mandria[df_mandria['nome'] == bov_sel]['stato_recinto'].values
-            stato_vecchio = res_stato[0] if len(res_stato) > 0 else "DENTRO"
+            bov_row = df_mandria[df_mandria['nome'] == bov_sel]
+            stato_vecchio = bov_row['stato_recinto'].values[0] if not bov_row.empty else "DENTRO"
             
             nuovo_in = is_inside(n_lat, n_lon, saved_coords)
             stato_nuovo = "DENTRO" if nuovo_in else "FUORI"
@@ -100,7 +101,7 @@ with col2:
             
             with conn.session as s:
                 s.execute(
-                    "UPDATE mandria SET lat=:lat, lon=:lon, stato_recinto=:stato WHERE nome=:nome",
+                    "UPDATE mandria SET lat=:lat, lon=:lon, stato_recinto=:stato, ultimo_aggiornamento=NOW() WHERE nome=:nome",
                     {"lat": n_lat, "lon": n_lon, "stato": stato_nuovo, "nome": bov_sel}
                 )
                 s.commit()
@@ -108,7 +109,7 @@ with col2:
 
 with col1:
     m = folium.Map(location=[45.1743, 9.2394], zoom_start=16)
-    # SATELLITE (Come originale)
+    # --- VISIONE SATELLITARE GOOGLE (Ripristinata esattamente) ---
     folium.TileLayer(
         tiles='https://mt1.google.com{x}&y={y}&z={z}',
         attr='Google Satellite', name='Google Satellite', overlay=False, control=False
@@ -130,8 +131,9 @@ with col1:
         fixed_poly = [[p[1], p[0]] for p in new_poly_raw]
         if st.button("Salva Recinto"):
             with conn.session as s:
+                # Usiamo la tabella 'recinti' come definita su Supabase
                 s.execute(
-                    "INSERT INTO recinto (id, coords) VALUES (1, :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords",
+                    "INSERT INTO recinti (nome, coords) VALUES ('Recinto 1', :coords)",
                     {"coords": json.dumps(fixed_poly)}
                 )
                 s.commit()
