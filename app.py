@@ -8,7 +8,7 @@ import pandas as pd
 import requests
 from sqlalchemy import text
 
-# --- DATABASE ---
+# --- CONNESSIONE DATABASE ---
 conn = st.connection("postgresql", type="sql")
 
 # --- FUNZIONI ---
@@ -19,28 +19,32 @@ def is_inside(lat, lon, polygon_coords):
 
 def invia_telegram(msg):
     try:
-        # Pulizia token e costruzione URL con slash esplicito
-        token = str(st.secrets["TELEGRAM_TOKEN"]).strip().replace("bot", "")
+        # Pulizia totale del token
+        token = str(st.secrets["TELEGRAM_TOKEN"]).strip()
         chat_id = str(st.secrets["TELEGRAM_CHAT_ID"]).strip()
-        url = f"https://api.telegram.org{token}/sendMessage"
-        resp = requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=10)
+        # URL costruito in modo esplicito per evitare errori di parsing
+        base_url = "https://api.telegram.org"
+        full_url = f"{base_url}{token}/sendMessage"
+        resp = requests.post(full_url, data={"chat_id": chat_id, "text": msg}, timeout=10)
         return resp.json()
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-# --- LOGICA DATI (Fix per l'errore di Hashing) ---
+# --- LOGICA DATI (Con protezione per la mappa) ---
 saved_coords = []
-df_mandria = pd.DataFrame()
+df_mandria = pd.DataFrame(columns=['id', 'nome', 'lat', 'lon', 'stato_recinto', 'batteria'])
 
 try:
-    # Usiamo la stringa semplice per .query() per evitare l'errore di hashing
+    # Cerchiamo di caricare i dati, ma non blocchiamo l'app se fallisce
     res_recinto = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
     if not res_recinto.empty:
         saved_coords = json.loads(res_recinto.iloc[0]['coords'])
     
-    df_mandria = conn.query("SELECT * FROM mandria", ttl=0)
+    res_mandria = conn.query("SELECT * FROM mandria", ttl=0)
+    if not res_mandria.empty:
+        df_mandria = res_mandria
 except Exception as e:
-    st.error(f"Errore Database: {e}")
+    st.sidebar.error(f"Connessione DB fallita: IPv6 non supportato o credenziali errate.")
 
 st.set_page_config(layout="wide")
 st.title("🛰️ Monitoraggio Bovini - Satellitare")
@@ -53,7 +57,6 @@ with st.sidebar.expander("➕ Aggiungi Bovino"):
     if st.button("Salva"):
         if n_id and n_nome:
             with conn.session as s:
-                # text() va usato solo dentro s.execute()
                 s.execute(
                     text("INSERT INTO mandria (id, nome, lat, lon, stato_recinto, batteria) "
                          "VALUES (:id, :nome, :lat, :lon, :stato, :bat) "
@@ -75,29 +78,8 @@ with col2:
         if risultato.get("ok"): st.success("✅ Inviato!")
         else: st.error(f"❌ Errore API: {risultato}")
 
-    st.write("---")
-    st.subheader("📍 Test Movimento")
-    if not df_mandria.empty:
-        bov_sel = st.selectbox("Sposta:", df_mandria['nome'].tolist())
-        n_lat = st.number_input("Lat", value=45.1743, format="%.6f")
-        n_lon = st.number_input("Lon", value=9.2394, format="%.6f")
-        if st.button("Aggiorna Posizione"):
-            bov_info = df_mandria[df_mandria['nome'] == bov_sel].iloc[0]
-            stato_vecchio = bov_info['stato_recinto']
-            nuovo_in = is_inside(n_lat, n_lon, saved_coords)
-            stato_nuovo = "DENTRO" if nuovo_in else "FUORI"
-            
-            if allarmi_attivi and stato_vecchio == "DENTRO" and stato_nuovo == "FUORI":
-                invia_telegram(f"🚨 ALLARME: {bov_sel} è USCITO!")
-            
-            with conn.session as s:
-                s.execute(text("UPDATE mandria SET lat=:lat, lon=:lon, stato_recinto=:stato WHERE nome=:nome"),
-                          {"lat": n_lat, "lon": n_lon, "stato": stato_nuovo, "nome": bov_sel})
-                s.commit()
-            st.rerun()
-
 with col1:
-    # MAPPA ORIGINALE STABILE
+    # MAPPA ORIGINALE - Ora visibile anche se il DB fallisce
     m = folium.Map(location=[45.1743, 9.2394], zoom_start=16)
     folium.TileLayer(
         tiles='https://mt1.google.com{x}&y={y}&z={z}',
@@ -116,7 +98,6 @@ with col1:
 
     if out and out.get('all_drawings'):
         new_poly_raw = out['all_drawings'][-1]['geometry']['coordinates'][0]
-        # Ripristinata inversione precisa [p[1], p[0]] della tua base stabile
         fixed_poly = [[p[1], p[0]] for p in new_poly_raw]
         if st.button("Salva Recinto"):
             with conn.session as s:
