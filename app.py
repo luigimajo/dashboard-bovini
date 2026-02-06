@@ -57,16 +57,23 @@ def fetch_ttn_data():
     return None
 
 # --- CARICAMENTO DATI DB ---
-df_recinti = conn.query("SELECT * FROM recinti", ttl=0)
-df_mandria = conn.query("SELECT * FROM mandria", ttl=0)
+try:
+    df_recinti = conn.query("SELECT * FROM recinti", ttl=0)
+    df_mandria = conn.query("SELECT * FROM mandria", ttl=0)
+except Exception as e:
+    st.error("Errore di connessione al database. Verifica di aver creato le tabelle su Supabase.")
+    df_recinti = pd.DataFrame()
+    df_mandria = pd.DataFrame()
 
-# Coordinate del primo recinto (se presente) per calcolo dentro/fuori
+# Caricamento coordinate (prende il primo se esiste)
 saved_coords = []
 if not df_recinti.empty:
-    saved_coords = json.loads(df_recinti.iloc[0]['coords'])
-
-st.set_page_config(layout="wide", page_title="Monitoraggio Bovini")
-st.title("🛰️ Monitoraggio Bovini - Satellitare")
+    try:
+        # Prende l'ultimo recinto creato
+        ultimo_recinto = df_recinti.iloc[-1]
+        saved_coords = json.loads(ultimo_recinto['coords'])
+    except:
+        saved_coords = []
 
 # --- SIDEBAR: GESTIONE ---
 st.sidebar.header("📋 Gestione Mandria")
