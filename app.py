@@ -7,7 +7,7 @@ import json
 import pandas as pd
 import requests
 
-# --- DATABASE (Sostituzione SQLite con Supabase PostgreSQL) ---
+# --- DATABASE (Supabase) ---
 conn = st.connection("postgresql", type="sql")
 
 # --- FUNZIONI ---
@@ -20,19 +20,23 @@ def invia_telegram(msg):
     try:
         token = st.secrets["TELEGRAM_TOKEN"].strip()
         chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        url = f"https://api.telegram.org{token}/sendMessage"
         resp = requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=10)
         return resp.json()
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
 # --- LOGICA DATI ---
-# Caricamento recinto ID=1 da Supabase
-df_recinto = conn.query("SELECT coords FROM recinto WHERE id = 1", ttl=0)
-saved_coords = json.loads(df_recinto.iloc[0]['coords']) if not df_recinto.empty else []
+try:
+    df_recinto = conn.query("SELECT coords FROM recinto WHERE id = 1", ttl=0)
+    saved_coords = json.loads(df_recinto.iloc[0]['coords']) if not df_recinto.empty else []
+except Exception:
+    saved_coords = []
 
-# Caricamento mandria da Supabase
-df_mandria = conn.query("SELECT * FROM mandria", ttl=0)
+try:
+    df_mandria = conn.query("SELECT * FROM mandria", ttl=0)
+except Exception:
+    df_mandria = pd.DataFrame(columns=['id', 'nome', 'lat', 'lon', 'stato_recinto', 'batteria'])
 
 st.set_page_config(layout="wide")
 st.title("🛰️ Monitoraggio Bovini - Satellitare")
@@ -66,10 +70,10 @@ if not df_mandria.empty:
 col1, col2 = st.columns([3, 1])
 
 with col2:
-    # --- INTERRUTTORE ALLARMI (Richiesto) ---
+    # --- INTERRUTTORE ALLARMI ---
     st.subheader("⚙️ Controllo")
     allarmi_attivi = st.toggle("Verifica Posizioni Attiva", value=True)
-    
+
     st.write("---")
     st.subheader("🧪 Test Telegram")
     if st.button("Invia Messaggio di Prova"):
@@ -85,14 +89,12 @@ with col2:
         n_lon = st.number_input("Lon", value=9.2394, format="%.6f")
         
         if st.button("Aggiorna Posizione"):
-            # Recupero stato vecchio
-            bov_row = df_mandria[df_mandria['nome'] == bov_sel].iloc[0]
-            stato_vecchio = bov_row['stato_recinto']
+            res_stato = df_mandria[df_mandria['nome'] == bov_sel]['stato_recinto'].values
+            stato_vecchio = res_stato[0] if len(res_stato) > 0 else "DENTRO"
             
             nuovo_in = is_inside(n_lat, n_lon, saved_coords)
             stato_nuovo = "DENTRO" if nuovo_in else "FUORI"
             
-            # Invio allarme solo se attivo e se esce
             if allarmi_attivi and stato_vecchio == "DENTRO" and stato_nuovo == "FUORI":
                 invia_telegram(f"🚨 ALLARME: {bov_sel} è USCITO!")
             
@@ -106,9 +108,9 @@ with col2:
 
 with col1:
     m = folium.Map(location=[45.1743, 9.2394], zoom_start=16)
-    # --- VISIONE SATELLITARE GOOGLE (Mantenuta come originale) ---
+    # SATELLITE (Come originale)
     folium.TileLayer(
-        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+        tiles='https://mt1.google.com{x}&y={y}&z={z}',
         attr='Google Satellite', name='Google Satellite', overlay=False, control=False
     ).add_to(m)
 
@@ -124,8 +126,8 @@ with col1:
     out = st_folium(m, width=800, height=550, key="main_map")
 
     if out and out.get('all_drawings'):
-        new_poly = out['all_drawings'][-1]['geometry']['coordinates'][0]
-        fixed_poly = [[p[1], p[0]] for p in new_poly]
+        new_poly_raw = out['all_drawings'][-1]['geometry']['coordinates'][0]
+        fixed_poly = [[p[1], p[0]] for p in new_poly_raw]
         if st.button("Salva Recinto"):
             with conn.session as s:
                 s.execute(
@@ -135,10 +137,7 @@ with col1:
                 s.commit()
             st.rerun()
 
-# --- LISTA BOVINI (SOTTO LA MAPPA) ---
+# --- LISTA BOVINI ---
 st.write("---")
-st.subheader(f"📊 Lista Mandria ({len(df_mandria)} capi)")
-if not df_mandria.empty:
-    st.dataframe(df_mandria, use_container_width=True, hide_index=True)
-else:
-    st.info("Nessun bovino in lista.")
+st.subheader(f"📊 Lista Mandria")
+st.dataframe(df_mandria, use_container_width=True, hide_index=True)
