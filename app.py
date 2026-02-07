@@ -17,15 +17,26 @@ def is_inside(lat, lon, polygon_coords):
     poly = Polygon(polygon_coords)
     return poly.contains(Point(lat, lon))
 
+#def invia_telegram(msg):
+#    try:
+#        token = st.secrets["TELEGRAM_TOKEN"].strip()
+#        chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
+#        url = f"https://api.telegram.org{token}/sendMessage"
+#        resp = requests.post(url, json={"chat_id": chat_id, "text": msg}, timeout=10)
+#        return resp.json()
+#    except Exception as e:
+#        return {"ok": False, "error": str(e)}
+
 def invia_telegram(msg):
     try:
         token = st.secrets["TELEGRAM_TOKEN"].strip()
         chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
-        url = f"https://api.telegram.org{token}/sendMessage"
-        resp = requests.post(url, json={"chat_id": chat_id, "text": msg}, timeout=10)
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        resp = requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=10)
         return resp.json()
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
 
 # --- LOGICA DATI (Query su Supabase) ---
 try:
