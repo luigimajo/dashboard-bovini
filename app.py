@@ -6,8 +6,9 @@ from shapely.geometry import Point, Polygon
 import json
 import pandas as pd
 import requests
+from sqlalchemy import text # Necessario per le query su Postgres
 
-# --- CONNESSIONE DATABASE (Sostituzione SQLite con Supabase) ---
+# --- CONNESSIONE DATABASE (Supabase via Pooler 6543) ---
 conn = st.connection("postgresql", type="sql")
 
 # --- FUNZIONI ---
@@ -21,25 +22,25 @@ def invia_telegram(msg):
         token = st.secrets["TELEGRAM_TOKEN"].strip()
         chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
         url = f"https://api.telegram.org{token}/sendMessage"
-        resp = requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=10)
+        resp = requests.post(url, json={"chat_id": chat_id, "text": msg}, timeout=10)
         return resp.json()
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-# --- LOGICA DATI (Con protezione anti-crash) ---
+# --- LOGICA DATI (Puntando alle tue tabelle Supabase) ---
 saved_coords = []
-df_mandria = pd.DataFrame(columns=['id', 'nome', 'lat', 'lon', 'stato_recinto', 'batteria'])
+df_mandria = pd.DataFrame()
 
 try:
-    # Caricamento recinto ID 1
-    res_rec = conn.query("SELECT coords FROM recinto WHERE id = 1", ttl=0)
+    # Caricamento recinto ID 1 dalla tua tabella 'recinti'
+    res_rec = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
     if not res_rec.empty:
-        saved_coords = json.loads(res_rec.iloc[0, 0])
+        saved_coords = json.loads(res_rec.iloc[0]['coords'])
     
-    # Caricamento mandria
+    # Caricamento mandria dalla tua tabella 'mandria'
     df_mandria = conn.query("SELECT * FROM mandria", ttl=0)
 except Exception as e:
-    st.sidebar.error("⚠️ Database in collegamento...")
+    st.sidebar.error("⚠️ Errore Database. Verifica i Secrets.")
 
 st.set_page_config(layout="wide")
 st.title("🛰️ Monitoraggio Bovini - Satellitare (Base1_Supabase)")
@@ -52,16 +53,17 @@ with st.sidebar.expander("➕ Aggiungi Bovino"):
     n_nome = st.text_input("Nome/Marca")
     if st.button("Salva"):
         if n_id and n_nome:
-            from sqlalchemy import text
             with conn.session as s:
                 s.execute(
-                    text("INSERT INTO mandria (id, nome, lat, lon, stato_recinto, batteria) VALUES (:id, :nome, :lat, :lon, :stato, :bat) ON CONFLICT (id) DO UPDATE SET nome = EXCLUDED.nome"),
-                    {"id": n_id, "nome": n_nome, "lat": 45.1743, "lon": 9.2394, "stato": "DENTRO", "bat": 100}
+                    text("INSERT INTO mandria (id, nome, lat, lon, stato_recinto, batteria, allarme_attivo) "
+                         "VALUES (:id, :nome, :lat, :lon, :stato, :bat, :alarm) "
+                         "ON CONFLICT (id) DO UPDATE SET nome = EXCLUDED.nome"),
+                    {"id": n_id, "nome": n_nome, "lat": 45.1743, "lon": 9.2394, "stato": "DENTRO", "bat": 100, "alarm": True}
                 )
                 s.commit()
             st.rerun()
 
-# --- LAYOUT PRINCIPALE ---
+# --- LAYOUT PRINCIPALE (3:1 come Base1) ---
 col1, col2 = st.columns([3, 1])
 
 with col2:
@@ -79,7 +81,6 @@ with col2:
         n_lon = st.number_input("Lon", value=9.2394, format="%.6f")
         
         if st.button("Aggiorna Posizione"):
-            # Filtro bovino selezionato
             bov_info = df_mandria[df_mandria['nome'] == bov_sel].iloc[0]
             stato_vecchio = bov_info['stato_recinto']
             
@@ -89,10 +90,11 @@ with col2:
             if stato_vecchio == "DENTRO" and stato_nuovo == "FUORI":
                 invia_telegram(f"🚨 ALLARME: {bov_sel} è USCITO!")
             
-            from sqlalchemy import text
             with conn.session as s:
-                s.execute(text("UPDATE mandria SET lat=:lat, lon=:lon, stato_recinto=:stato WHERE nome=:nome"),
-                          {"lat": n_lat, "lon": n_lon, "stato": stato_nuovo, "nome": bov_sel})
+                s.execute(
+                    text("UPDATE mandria SET lat=:lat, lon=:lon, stato_recinto=:stato, ultimo_aggiornamento=NOW() WHERE nome=:nome"),
+                    {"lat": n_lat, "lon": n_lon, "stato": stato_nuovo, "nome": bov_sel}
+                )
                 s.commit()
             st.rerun()
 
@@ -117,14 +119,14 @@ with col1:
         new_poly = out['all_drawings'][-1]['geometry']['coordinates'][0]
         fixed_poly = [[p[1], p[0]] for p in new_poly]
         if st.button("Salva Recinto"):
-            from sqlalchemy import text
             with conn.session as s:
-                s.execute(text("INSERT INTO recinto (id, coords) VALUES (1, :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"),
-                          {"coords": json.dumps(fixed_poly)})
+                s.execute(
+                    text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Recinto 1', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"),
+                    {"coords": json.dumps(fixed_poly)}
+                )
                 s.commit()
             st.rerun()
 
-# --- LISTA BOVINI ---
 st.write("---")
 st.subheader(f"📊 Lista Mandria")
 st.dataframe(df_mandria, use_container_width=True, hide_index=True)
