@@ -95,7 +95,8 @@ with col2:
 with col1:
     m = folium.Map(location=[45.1743, 9.2394], zoom_start=16)
     folium.TileLayer(
-        tiles='https://mt1.google.com{x}&y={y}&z={z}',
+# ---        tiles='https://mt1.google.com{x}&y={y}&z={z}',
+        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
         attr='Google Satellite', name='Google Satellite', overlay=False, control=False
     ).add_to(m)
 
