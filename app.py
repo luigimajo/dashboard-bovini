@@ -10,7 +10,7 @@ import requests
 # --- DATABASE ---
 conn = sqlite3.connect('bovini.db', check_same_thread=False)
 c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS mandria
+c.execute(CREATE TABLE IF NOT EXISTS mandria
  (id TEXT PRIMARY KEY, nome TEXT, lat REAL, lon REAL, stato_
 c.execute('CREATE TABLE IF NOT EXISTS recinto (id INTEGER PRIMARY KEY, c
 conn.commit()
