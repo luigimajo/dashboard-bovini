@@ -3,24 +3,16 @@ import folium
 from streamlit_folium import st_folium
 from folium.plugins import Draw
 from shapely.geometry import Point, Polygon
-import sqlite3
 import json
 import pandas as pd
 import requests
 
-# --- DATABASE (SQLite Locale) ---
-conn = sqlite3.connect('bovini.db', check_same_thread=False)
-c = conn.cursor()
-
-# Creazione tabelle originali
-c.execute('CREATE TABLE IF NOT EXISTS mandria (id TEXT PRIMARY KEY, nome TEXT, lat REAL, lon REAL, stato_recinto TEXT, batteria INTEGER)')
-c.execute('CREATE TABLE IF NOT EXISTS recinto (id INTEGER PRIMARY KEY, coords TEXT)')
-conn.commit()
+# --- CONNESSIONE DATABASE (Sostituzione SQLite con Supabase) ---
+conn = st.connection("postgresql", type="sql")
 
 # --- FUNZIONI ---
 def is_inside(lat, lon, polygon_coords):
-    if not polygon_coords or len(polygon_coords) < 3: 
-        return True
+    if not polygon_coords or len(polygon_coords) < 3: return True
     poly = Polygon(polygon_coords)
     return poly.contains(Point(lat, lon))
 
@@ -28,20 +20,29 @@ def invia_telegram(msg):
     try:
         token = st.secrets["TELEGRAM_TOKEN"].strip()
         chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        url = f"https://api.telegram.org{token}/sendMessage"
         resp = requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=10)
         return resp.json()
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-# --- LOGICA DATI ---
-c.execute("SELECT coords FROM recinto WHERE id = 1")
-res = c.fetchone()
-saved_coords = json.loads(res[0]) if res and res[0] else []
-df_mandria = pd.read_sql_query("SELECT * FROM mandria", conn)
+# --- LOGICA DATI (Con protezione anti-crash) ---
+saved_coords = []
+df_mandria = pd.DataFrame(columns=['id', 'nome', 'lat', 'lon', 'stato_recinto', 'batteria'])
+
+try:
+    # Caricamento recinto ID 1
+    res_rec = conn.query("SELECT coords FROM recinto WHERE id = 1", ttl=0)
+    if not res_rec.empty:
+        saved_coords = json.loads(res_rec.iloc[0, 0])
+    
+    # Caricamento mandria
+    df_mandria = conn.query("SELECT * FROM mandria", ttl=0)
+except Exception as e:
+    st.sidebar.error("⚠️ Database in collegamento...")
 
 st.set_page_config(layout="wide")
-st.title("🛰️ Monitoraggio Bovini - Satellitare")
+st.title("🛰️ Monitoraggio Bovini - Satellitare (Base1_Supabase)")
 
 # --- SIDEBAR: AGGIUNGI E RIMUOVI ---
 st.sidebar.header("📋 Gestione Mandria")
@@ -51,17 +52,13 @@ with st.sidebar.expander("➕ Aggiungi Bovino"):
     n_nome = st.text_input("Nome/Marca")
     if st.button("Salva"):
         if n_id and n_nome:
-            c.execute("INSERT OR REPLACE INTO mandria VALUES (?, ?, ?, ?, ?, ?)", 
-                      (n_id, n_nome, 45.1743, 9.2394, "DENTRO", 100))
-            conn.commit()
-            st.rerun()
-
-if not df_mandria.empty:
-    with st.sidebar.expander("🗑️ Rimuovi Bovino"):
-        bov_da_eliminar = st.selectbox("Seleziona:", df_mandria['nome'].tolist(), key="del_bov")
-        if st.button("Elimina"):
-            c.execute("DELETE FROM mandria WHERE nome=?", (bov_da_eliminar,))
-            conn.commit()
+            from sqlalchemy import text
+            with conn.session as s:
+                s.execute(
+                    text("INSERT INTO mandria (id, nome, lat, lon, stato_recinto, batteria) VALUES (:id, :nome, :lat, :lon, :stato, :bat) ON CONFLICT (id) DO UPDATE SET nome = EXCLUDED.nome"),
+                    {"id": n_id, "nome": n_nome, "lat": 45.1743, "lon": 9.2394, "stato": "DENTRO", "bat": 100}
+                )
+                s.commit()
             st.rerun()
 
 # --- LAYOUT PRINCIPALE ---
@@ -70,11 +67,9 @@ col1, col2 = st.columns([3, 1])
 with col2:
     st.subheader("🧪 Test Telegram")
     if st.button("Invia Messaggio di Prova"):
-        risultato = invia_telegram("👋 Test connessione dalla Dashboard!")
-        if risultato.get("ok"): 
-            st.success("✅ Inviato!")
-        else: 
-            st.error("❌ Errore")
+        risultato = invia_telegram("👋 Test connessione Base1_Supabase!")
+        if risultato.get("ok"): st.success("✅ Inviato!")
+        else: st.error("❌ Errore")
 
     st.write("---")
     st.subheader("📍 Test Movimento")
@@ -84,9 +79,9 @@ with col2:
         n_lon = st.number_input("Lon", value=9.2394, format="%.6f")
         
         if st.button("Aggiorna Posizione"):
-            c.execute("SELECT stato_recinto FROM mandria WHERE nome=?", (bov_sel,))
-            res_stato = c.fetchone()
-            stato_vecchio = res_stato[0] if res_stato else "DENTRO"
+            # Filtro bovino selezionato
+            bov_info = df_mandria[df_mandria['nome'] == bov_sel].iloc[0]
+            stato_vecchio = bov_info['stato_recinto']
             
             nuovo_in = is_inside(n_lat, n_lon, saved_coords)
             stato_nuovo = "DENTRO" if nuovo_in else "FUORI"
@@ -94,15 +89,17 @@ with col2:
             if stato_vecchio == "DENTRO" and stato_nuovo == "FUORI":
                 invia_telegram(f"🚨 ALLARME: {bov_sel} è USCITO!")
             
-            c.execute("UPDATE mandria SET lat=?, lon=?, stato_recinto=? WHERE nome=?", 
-                      (n_lat, n_lon, stato_nuovo, bov_sel))
-            conn.commit()
+            from sqlalchemy import text
+            with conn.session as s:
+                s.execute(text("UPDATE mandria SET lat=:lat, lon=:lon, stato_recinto=:stato WHERE nome=:nome"),
+                          {"lat": n_lat, "lon": n_lon, "stato": stato_nuovo, "nome": bov_sel})
+                s.commit()
             st.rerun()
 
 with col1:
     m = folium.Map(location=[45.1743, 9.2394], zoom_start=16)
     folium.TileLayer(
-        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+        tiles='https://mt1.google.com{x}&y={y}&z={z}',
         attr='Google Satellite', name='Google Satellite', overlay=False, control=False
     ).add_to(m)
 
@@ -114,21 +111,20 @@ with col1:
         folium.Marker([row['lat'], row['lon']], popup=row['nome'], icon=folium.Icon(color=col)).add_to(m)
 
     Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
-    
     out = st_folium(m, width=800, height=550, key="main_map")
 
     if out and out.get('all_drawings'):
         new_poly = out['all_drawings'][-1]['geometry']['coordinates'][0]
         fixed_poly = [[p[1], p[0]] for p in new_poly]
         if st.button("Salva Recinto"):
-            c.execute("INSERT OR REPLACE INTO recinto (id, coords) VALUES (1, ?)", (json.dumps(fixed_poly),))
-            conn.commit()
+            from sqlalchemy import text
+            with conn.session as s:
+                s.execute(text("INSERT INTO recinto (id, coords) VALUES (1, :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"),
+                          {"coords": json.dumps(fixed_poly)})
+                s.commit()
             st.rerun()
 
 # --- LISTA BOVINI ---
 st.write("---")
-st.subheader(f"📊 Lista Mandria ({len(df_mandria)} capi)")
-if not df_mandria.empty:
-    st.dataframe(df_mandria, use_container_width=True, hide_index=True)
-else:
-    st.info("Nessun bovino in lista.")
+st.subheader(f"📊 Lista Mandria")
+st.dataframe(df_mandria, use_container_width=True, hide_index=True)
