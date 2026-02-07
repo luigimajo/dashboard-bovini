@@ -8,16 +8,19 @@ import json
 import pandas as pd
 import requests
 
-# --- DATABASE LOCALE (Base1 Stabile) ---
+# --- DATABASE (SQLite Locale) ---
 conn = sqlite3.connect('bovini.db', check_same_thread=False)
 c = conn.cursor()
+
+# Creazione tabelle originali
 c.execute('CREATE TABLE IF NOT EXISTS mandria (id TEXT PRIMARY KEY, nome TEXT, lat REAL, lon REAL, stato_recinto TEXT, batteria INTEGER)')
 c.execute('CREATE TABLE IF NOT EXISTS recinto (id INTEGER PRIMARY KEY, coords TEXT)')
 conn.commit()
 
 # --- FUNZIONI ---
 def is_inside(lat, lon, polygon_coords):
-    if not polygon_coords or len(polygon_coords) < 3: return True
+    if not polygon_coords or len(polygon_coords) < 3: 
+        return True
     poly = Polygon(polygon_coords)
     return poly.contains(Point(lat, lon))
 
@@ -25,7 +28,7 @@ def invia_telegram(msg):
     try:
         token = st.secrets["TELEGRAM_TOKEN"].strip()
         chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
-        url = f"https://api.telegram.org{token}/sendMessage"
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
         resp = requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=10)
         return resp.json()
     except Exception as e:
@@ -38,7 +41,7 @@ saved_coords = json.loads(res[0]) if res and res[0] else []
 df_mandria = pd.read_sql_query("SELECT * FROM mandria", conn)
 
 st.set_page_config(layout="wide")
-st.title("🛰️ Monitoraggio Bovini - Satellitare (Base1)")
+st.title("🛰️ Monitoraggio Bovini - Satellitare")
 
 # --- SIDEBAR: AGGIUNGI E RIMUOVI ---
 st.sidebar.header("📋 Gestione Mandria")
@@ -48,7 +51,8 @@ with st.sidebar.expander("➕ Aggiungi Bovino"):
     n_nome = st.text_input("Nome/Marca")
     if st.button("Salva"):
         if n_id and n_nome:
-            c.execute("INSERT OR REPLACE INTO mandria VALUES (?, ?, ?, ?, ?, ?)", (n_id, n_nome, 45.1743, 9.2394, "DENTRO", 100))
+            c.execute("INSERT OR REPLACE INTO mandria VALUES (?, ?, ?, ?, ?, ?)", 
+                      (n_id, n_nome, 45.1743, 9.2394, "DENTRO", 100))
             conn.commit()
             st.rerun()
 
@@ -67,8 +71,10 @@ with col2:
     st.subheader("🧪 Test Telegram")
     if st.button("Invia Messaggio di Prova"):
         risultato = invia_telegram("👋 Test connessione dalla Dashboard!")
-        if risultato.get("ok"): st.success("✅ Inviato!")
-        else: st.error("❌ Errore")
+        if risultato.get("ok"): 
+            st.success("✅ Inviato!")
+        else: 
+            st.error("❌ Errore")
 
     st.write("---")
     st.subheader("📍 Test Movimento")
@@ -88,14 +94,15 @@ with col2:
             if stato_vecchio == "DENTRO" and stato_nuovo == "FUORI":
                 invia_telegram(f"🚨 ALLARME: {bov_sel} è USCITO!")
             
-            c.execute("UPDATE mandria SET lat=?, lon=?, stato_recinto=? WHERE nome=?", (n_lat, n_lon, stato_nuovo, bov_sel))
+            c.execute("UPDATE mandria SET lat=?, lon=?, stato_recinto=? WHERE nome=?", 
+                      (n_lat, n_lon, stato_nuovo, bov_sel))
             conn.commit()
             st.rerun()
 
 with col1:
     m = folium.Map(location=[45.1743, 9.2394], zoom_start=16)
     folium.TileLayer(
-        tiles='https://mt1.google.com{x}&y={y}&z={z}',
+        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
         attr='Google Satellite', name='Google Satellite', overlay=False, control=False
     ).add_to(m)
 
@@ -125,15 +132,3 @@ if not df_mandria.empty:
     st.dataframe(df_mandria, use_container_width=True, hide_index=True)
 else:
     st.info("Nessun bovino in lista.")
-
-# --- TEST CONNESSIONE SUPABASE (Silenzioso alla fine) ---
-st.write("---")
-with st.expander("🛠️ Debug Connessione Esterna"):
-    try:
-        remote_conn = st.connection("postgresql", type="sql")
-        # Proviamo una query semplice per testare i Secrets
-        test_query = remote_conn.query("SELECT 1", ttl=0)
-        st.success("✅ Connessione a Supabase riuscita (Pooler attivo)!")
-    except Exception as e:
-        st.warning(f"⚠️ Supabase non ancora raggiungibile: {e}")
-
