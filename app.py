@@ -38,7 +38,7 @@ saved_coords = json.loads(res[0]) if res and res[0] else []
 df_mandria = pd.read_sql_query("SELECT * FROM mandria", conn)
 
 st.set_page_config(layout="wide")
-st.title("🛰️ Monitoraggio Bovini - Satellitare (Base1)")
+st.title("🛰️ Monitoraggio Bovini - Satellitare (base1 supabase1)")
 
 # --- SIDEBAR: AGGIUNGI E RIMUOVI ---
 st.sidebar.header("📋 Gestione Mandria")
@@ -94,8 +94,8 @@ with col2:
 
 with col1:
     m = folium.Map(location=[45.1743, 9.2394], zoom_start=16)
+    # --- CORREZIONE SATELLITE (base1 originaria) ---
     folium.TileLayer(
-# ---        tiles='https://mt1.google.com{x}&y={y}&z={z}',
         tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
         attr='Google Satellite', name='Google Satellite', overlay=False, control=False
     ).add_to(m)
@@ -124,15 +124,12 @@ st.write("---")
 st.subheader(f"📊 Lista Mandria ({len(df_mandria)} capi)")
 if not df_mandria.empty:
     st.dataframe(df_mandria, use_container_width=True, hide_index=True)
-else:
-    st.info("Nessun bovino in lista.")
 
-# --- TEST CONNESSIONE SUPABASE (Silenzioso alla fine) ---
+# --- DEBUG SUPABASE (base1 supabase1) ---
 st.write("---")
 with st.expander("🛠️ Debug Connessione Esterna"):
     try:
         remote_conn = st.connection("postgresql", type="sql")
-        # Proviamo una query semplice per testare i Secrets
         test_query = remote_conn.query("SELECT 1", ttl=0)
         st.success("✅ Connessione a Supabase riuscita (Pooler attivo)!")
     except Exception as e:
