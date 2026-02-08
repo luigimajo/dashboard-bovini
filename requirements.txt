@@ -7,3 +7,4 @@ shapely
 pandas
 psycopg2-binary
 sqlalchemy
+paho-mqtt
