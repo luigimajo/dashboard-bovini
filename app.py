@@ -23,14 +23,11 @@ def is_inside(lat, lon, polygon_coords):
     return poly.contains(Point(lat, lon))
 
 def invia_telegram(msg):
-    """Versione corretta e testata per Telegram Bot API"""
     try:
         token = st.secrets["TELEGRAM_TOKEN"].strip()
         chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        # Usiamo 'data' invece di 'json' per massima compatibilità con l'API Telegram
-        payload = {"chat_id": chat_id, "text": msg}
-        resp = requests.post(url, data=payload, timeout=10)
+        url = f"https://api.telegram.org{token}/sendMessage"
+        resp = requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=10)
         return resp.json()
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -80,6 +77,14 @@ if 'mqtt_started' not in st.session_state:
     threading.Thread(target=avvia_ascolto_ttn, daemon=True).start()
     st.session_state['mqtt_started'] = True
 
+# --- CARICAMENTO DATI ---
+try:
+    df_rec = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
+    saved_coords = json.loads(df_rec.iloc[0]['coords']) if not df_rec.empty else []
+    df_mandria = conn.query("SELECT * FROM mandria", ttl=0)
+except Exception:
+    df_mandria, saved_coords = pd.DataFrame(), []
+
 # --- SIDEBAR (GESTIONE MANDRIA) ---
 st.sidebar.header("📋 GESTIONE MANDRIA")
 with st.sidebar.expander("➕ Aggiungi Bovino"):
@@ -92,6 +97,15 @@ with st.sidebar.expander("➕ Aggiungi Bovino"):
                 s.commit()
             st.rerun()
 
+if not df_mandria.empty:
+    with st.sidebar.expander("🗑️ Rimuovi Bovino"):
+        bov_del = st.selectbox("Seleziona da eliminare:", df_mandria['nome'].tolist())
+        if st.button("Elimina"):
+            with conn.session as s:
+                s.execute(text("DELETE FROM mandria WHERE nome=:nome"), {"nome": bov_del})
+                s.commit()
+            st.rerun()
+
 # --- LAYOUT PRINCIPALE ---
 st.title("🛰️ MONITORAGGIO BOVINI Base TTN1")
 
@@ -100,42 +114,53 @@ col_map, col_ctrl = st.columns([3, 1])
 with col_ctrl:
     st.subheader("🧪 Test Telegram")
     if st.button("Invia Test"):
-        ris = invia_telegram("👋 Test manuale riuscito su MONITORAGGIO BOVINI Base TTN1!")
-        if ris.get("ok"): st.success("Inviato!")
-        else: st.error(f"Errore: {ris.get('description', 'Sconosciuto')}")
-
-with col_map:
-    # --- VISUALIZZAZIONE SATELLITE GOOGLE ---
-    m = folium.Map(location=[45.1743, 9.2394], zoom_start=17)
-    # tiles='https://mt1.google.com{x}&y={y}&z={z}',
-    folium.TileLayer(
-        
-    #   tiles='https://mt1.google.com{x}&y={y}&z={z}',
-        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-
-        attr='Google Satellite', name='Google Satellite', overlay=False, control=False
-    ).add_to(m)
-
-    df_mandria = conn.query("SELECT * FROM mandria", ttl=0)
-    df_rec = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
-    saved_coords = json.loads(df_rec.iloc[0]['coords']) if not df_rec.empty else []
-
-    if saved_coords:
-        folium.Polygon(locations=saved_coords, color="yellow", weight=5, fill=True, fill_opacity=0.2).add_to(m)
-    for _, row in df_mandria.iterrows():
-        col = 'green' if row['stato_recinto'] == "DENTRO" else 'red'
-        folium.Marker([row['lat'], row['lon']], popup=row['nome'], icon=folium.Icon(color=col)).add_to(m)
-
-    Draw(draw_options={'polyline':False,'polygon':True}).add_to(m)
-    # width="100%" garantisce che la mappa non copra la sidebar
-    out = st_folium(m, width="100%", height=600)
-
-    if out and out.get('all_drawings'):
-        new_poly = [[p[1], p[0]] for p in out['all_drawings'][-1]['geometry']['coordinates'][0]]
-        if st.button("Salva Nuovo Recinto"):
+        invia_telegram("👋 Test manuale riuscito su MONITORAGGIO BOVINI Base TTN1!")
+    
+    st.write("---")
+    if not df_mandria.empty:
+        st.subheader("📍 Test Movimento")
+        bov_sel = st.selectbox("Sposta:", df_mandria['nome'].tolist())
+        n_lat = st.number_input("Lat", value=45.1743, format="%.6f")
+        n_lon = st.number_input("Lon", value=9.2394, format="%.6f")
+        if st.button("Aggiorna Posizione Manuale"):
+            nuovo_in = is_inside(n_lat, n_lon, saved_coords)
+            stato_nuovo = "DENTRO" if nuovo_in else "FUORI"
+            # Controllo allarme anche per spostamento manuale
+            bov_info = df_mandria[df_mandria['nome'] == bov_sel].iloc[0]
+            if bov_info['stato_recinto'] == "DENTRO" and stato_nuovo == "FUORI":
+                invia_telegram(f"🚨 ALLARME MANUALE: {bov_sel} è USCITO!")
+            
             with conn.session as s:
-                s.execute(text("UPDATE recinti SET coords=:c WHERE id=1"), {"c": json.dumps(new_poly)})
+                s.execute(text("UPDATE mandria SET lat=:lat, lon=:lon, stato_recinto=:stato, ultimo_aggiornamento=NOW() WHERE nome=:nome"), {"lat": n_lat, "lon": n_lon, "stato": stato_nuovo, "nome": bov_sel})
                 s.commit()
             st.rerun()
 
+with col_map:
+    m = folium.Map(location=[45.1743, 9.2394], zoom_start=17)
+    # --- VISUALIZZAZIONE SATELLITE GOOGLE ---
+    # tiles='https://mt1.google.com{x}&y={y}&z={z}',
+    folium.TileLayer(
+        tiles='https://mt1.google.com{x}&y={y}&z={z}',
+        attr='Google Satellite', name='Google Satellite', overlay=False, control=False
+    ).add_to(m)
+
+    if saved_coords:
+        folium.Polygon(locations=saved_coords, color="yellow", weight=5, fill=True, fill_opacity=0.2).add_to(m)
+
+    for i, row in df_mandria.iterrows():
+        col_m = 'green' if row['stato_recinto'] == "DENTRO" else 'red'
+        folium.Marker([row['lat'], row['lon']], popup=f"{row['nome']} ({row['id']})", icon=folium.Icon(color=col_m)).add_to(m)
+
+    Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
+    out = st_folium(m, width="100%", height=600, key="main_map")
+
+    if out and out.get('all_drawings'):
+        new_poly = [[p[1], p[0]] for p in out['all_drawings'][-1]['geometry']['coordinates'][0]]
+        if st.button("Salva Recinto"):
+            with conn.session as s:
+                s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Recinto 1', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), {"coords": json.dumps(new_poly)})
+                s.commit()
+            st.rerun()
+
+st.write("---")
 st.dataframe(df_mandria, use_container_width=True, hide_index=True)
