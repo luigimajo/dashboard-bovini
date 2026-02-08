@@ -9,57 +9,14 @@ import requests
 from sqlalchemy import text
 import paho.mqtt.client as mqtt
 import threading
-from streamlit_autorefresh import st_autorefresh # <-- NUOVO: per refresh automatico
+from streamlit_autorefresh import st_autorefresh
 
-# --- CONFIGURAZIONE PAGINA ---
-st.set_page_config(layout="wide", page_title="Monitoraggio Bovini")
-
-# --- AUTO-REFRESH (Ogni 30 secondi) ---
+# --- CONFIGURAZIONE ---
+st.set_page_config(layout="wide")
 st_autorefresh(interval=30000, key="datarefresh")
-
-# --- DATABASE (Connessione Supabase) ---
 conn = st.connection("postgresql", type="sql")
 
-# --- BRIDGE MQTT (Ascolto TTN in Background) ---
-def avvia_ascolto_ttn():
-    def on_message(client, userdata, msg):
-        try:
-            payload = json.loads(msg.payload)
-            dev_id = payload['end_device_ids']['device_id']
-            decoded = payload['uplink_message'].get('decoded_payload', {})
-            
-            lat = decoded.get('latitude')
-            lon = decoded.get('longitude')
-            bat = decoded.get('battery_percent', 100)
-
-            if lat and lon:
-                with conn.session as s:
-                    s.execute(
-                        text("UPDATE mandria SET lat=:lat, lon=:lon, batteria=:bat, ultimo_aggiornamento=NOW() WHERE id=:id"),
-                        {"lat": lat, "lon": lon, "bat": bat, "id": dev_id}
-                    )
-                    s.commit()
-        except Exception:
-            pass
-
-    try:
-        client = mqtt.Client()
-        user_ttn = f"{st.secrets['TTN_APP_ID']}@ttn"
-        client.username_pw_set(user_ttn, st.secrets["TTN_API_KEY"])
-        client.on_message = on_message
-        client.connect(st.secrets["TTN_MQTT_HOST"], int(st.secrets["TTN_MQTT_PORT"]))
-        client.subscribe("#")
-        client.loop_forever()
-    except Exception:
-        pass
-
-# Avvio del Thread per MQTT (una sola volta)
-if 'mqtt_started' not in st.session_state:
-    thread = threading.Thread(target=avvia_ascolto_ttn, daemon=True)
-    thread.start()
-    st.session_state['mqtt_started'] = True
-
-# --- FUNZIONI ---
+# --- FUNZIONI CORE ---
 def is_inside(lat, lon, polygon_coords):
     if not polygon_coords or len(polygon_coords) < 3: return True
     poly = Polygon(polygon_coords)
@@ -69,60 +26,102 @@ def invia_telegram(msg):
     try:
         token = st.secrets["TELEGRAM_TOKEN"].strip()
         chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
-#       url = f"https://api.telegram.org{token}/sendMessage"
+        # URL CORRETTO CON /bot
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-
         resp = requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=10)
         return resp.json()
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-# --- LOGICA DATI ---
+# --- BRIDGE MQTT CON ALLARME AUTOMATICO ---
+def avvia_ascolto_ttn():
+    def on_message(client, userdata, msg):
+        try:
+            payload = json.loads(msg.payload)
+            dev_id = payload['end_device_ids']['device_id']
+            decoded = payload['uplink_message'].get('decoded_payload', {})
+            
+            lat, lon = decoded.get('latitude'), decoded.get('longitude')
+            bat = decoded.get('battery_percent', 100)
+
+            if lat and lon:
+                # 1. Recupera stato attuale e recinto per l'allarme
+                with conn.session as s:
+                    # Carica coordinate recinto
+                    res_rec = s.execute(text("SELECT coords FROM recinti WHERE id = 1")).fetchone()
+                    coords_rec = json.loads(res_rec[0]) if res_rec else []
+                    
+                    # Carica stato precedente bovino
+                    res_bov = s.execute(text("SELECT nome, stato_recinto FROM mandria WHERE id = :id"), {"id": dev_id}).fetchone()
+                    
+                    if res_bov and coords_rec:
+                        nome_bov, stato_vecchio = res_bov
+                        
+                        # 2. Controllo Geofencing
+                        nuovo_in = is_inside(lat, lon, coords_rec)
+                        stato_nuovo = "DENTRO" if nuovo_in else "FUORI"
+                        
+                        # 3. Invia Telegram se è appena uscito
+                        if stato_vecchio == "DENTRO" and stato_nuovo == "FUORI":
+                            invia_telegram(f"🚨 ALLARME AUTOMATICO: {nome_bov} ({dev_id}) è USCITO dal recinto!")
+
+                        # 4. Aggiorna DB
+                        s.execute(
+                            text("UPDATE mandria SET lat=:lat, lon=:lon, batteria=:bat, stato_recinto=:stato, ultimo_aggiornamento=NOW() WHERE id=:id"),
+                            {"lat": lat, "lon": lon, "bat": bat, "stato": stato_nuovo, "id": dev_id}
+                        )
+                        s.commit()
+        except Exception: pass
+
+    try:
+        client = mqtt.Client()
+        user_ttn = f"{st.secrets['TTN_APP_ID']}@ttn"
+        client.username_pw_set(user_ttn, st.secrets["TTN_API_KEY"])
+        client.on_message = on_message
+        client.connect(st.secrets["TTN_MQTT_HOST"], int(st.secrets["TTN_MQTT_PORT"]))
+        client.subscribe("#")
+        client.loop_forever()
+    except Exception: pass
+
+if 'mqtt_started' not in st.session_state:
+    threading.Thread(target=avvia_ascolto_ttn, daemon=True).start()
+    st.session_state['mqtt_started'] = True
+
+# --- LOGICA UI (Query per visualizzazione) ---
 try:
     df_rec = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
     saved_coords = json.loads(df_rec.iloc[0]['coords']) if not df_rec.empty else []
     df_mandria = conn.query("SELECT * FROM mandria", ttl=0)
 except Exception as e:
-    st.error(f"Errore caricamento dati: {e}")
-    df_mandria = pd.DataFrame()
-    saved_coords = []
+    st.error(f"Errore caricamento: {e}")
+    df_mandria, saved_coords = pd.DataFrame(), []
 
+# --- INTERFACCIA (Mappa e Tabella) ---
 st.title("🛰️ Monitoraggio Bovini - Satellitare (base1 supabase2)")
 
-# --- SIDEBAR ---
-st.sidebar.header("📋 Gestione Mandria")
-
-with st.sidebar.expander("➕ Aggiungi Bovino"):
-    n_id = st.text_input("ID Tracker (deve corrispondere a TTN)")
-    n_nome = st.text_input("Nome/Marca")
-    if st.button("Salva"):
-        if n_id and n_nome:
-            with conn.session as s:
-                s.execute(
-                    text("INSERT INTO mandria (id, nome, lat, lon, stato_recinto, batteria, allarme_attivo) "
-                         "VALUES (:id, :nome, :lat, :lon, :stato, :bat, :alarm) "
-                         "ON CONFLICT (id) DO UPDATE SET nome = EXCLUDED.nome"),
-                    {"id": n_id, "nome": n_nome, "lat": 45.1743, "lon": 9.2394, "stato": "DENTRO", "bat": 100, "alarm": True}
-                )
-                s.commit()
-            st.rerun()
-
-if not df_mandria.empty:
-    with st.sidebar.expander("🗑️ Rimuovi Bovino"):
-        bov_da_eliminar = st.selectbox("Seleziona:", df_mandria['nome'].tolist(), key="del_bov")
-        if st.button("Elimina"):
-            with conn.session as s:
-                s.execute(text("DELETE FROM mandria WHERE nome=:nome"), {"nome": bov_da_eliminar})
-                s.commit()
-            st.rerun()
-
-# --- LAYOUT ---
 col1, col2 = st.columns([3, 1])
+with col1:
+    m = folium.Map(location=[45.1743, 9.2394], zoom_start=16)
+    folium.TileLayer(
+        tiles='https://mt1.google.com{x}&y={y}&z={z}',
+        attr='Google Satellite', name='Google Satellite', overlay=False, control=False
+    ).add_to(m)
+    
+    if saved_coords:
+        folium.Polygon(locations=saved_coords, color="yellow", weight=5, fill=True, fill_opacity=0.2).add_to(m)
+    
+    for _, row in df_mandria.iterrows():
+        col_m = 'green' if row['stato_recinto'] == "DENTRO" else 'red'
+        folium.Marker([row['lat'], row['lon']], popup=row['nome'], icon=folium.Icon(color=col_m)).add_to(m)
+    
+    st_folium(m, width=800, height=550, key="main_map")
 
 with col2:
-    st.subheader("🧪 Test Telegram")
-    if st.button("Invia Test"):
-        invia_telegram("👋 Test connessione riuscito!")
+    st.subheader("📊 Mandria")
+    st.dataframe(df_mandria[['nome', 'stato_recinto', 'batteria']], hide_index=True)
+    if st.button("Invia Test Telegram"):
+        invia_telegram("👋 Test manuale riuscito!")
+
     
     st.write("---")
     st.subheader("📍 Test Movimento")
