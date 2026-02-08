@@ -118,7 +118,7 @@ col_map, col_ctrl = st.columns([3, 1])
 with col_ctrl:
     st.subheader("🧪 Strumenti")
     if st.button("Invia Test Telegram"):
-        invia_telegram("👋 Test connessione riuscito!")
+        invia_telegram(f"👋 Test connessione riuscito!")
     
     st.write("---")
     if not df_mandria.empty:
