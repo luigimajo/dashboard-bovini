@@ -12,7 +12,7 @@ import threading
 from streamlit_autorefresh import st_autorefresh
 
 # --- CONFIGURAZIONE PAGINA ---
-st.set_page_config(layout="wide", page_title="Monitoraggio Bovini")
+# st.set_page_config(layout="wide", page_title="Monitoraggio Bovini")
 
 # Refresh automatico ogni 30 secondi
 st_autorefresh(interval=30000, key="datarefresh")
