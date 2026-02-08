@@ -7,9 +7,57 @@ import json
 import pandas as pd
 import requests
 from sqlalchemy import text
+import paho.mqtt.client as mqtt
+import threading
+from streamlit_autorefresh import st_autorefresh # <-- NUOVO: per refresh automatico
 
-# --- DATABASE (Migrazione completa a Supabase) ---
+# --- CONFIGURAZIONE PAGINA ---
+st.set_page_config(layout="wide", page_title="Monitoraggio Bovini")
+
+# --- AUTO-REFRESH (Ogni 30 secondi) ---
+st_autorefresh(interval=30000, key="datarefresh")
+
+# --- DATABASE (Connessione Supabase) ---
 conn = st.connection("postgresql", type="sql")
+
+# --- BRIDGE MQTT (Ascolto TTN in Background) ---
+def avvia_ascolto_ttn():
+    def on_message(client, userdata, msg):
+        try:
+            payload = json.loads(msg.payload)
+            dev_id = payload['end_device_ids']['device_id']
+            decoded = payload['uplink_message'].get('decoded_payload', {})
+            
+            lat = decoded.get('latitude')
+            lon = decoded.get('longitude')
+            bat = decoded.get('battery_percent', 100)
+
+            if lat and lon:
+                with conn.session as s:
+                    s.execute(
+                        text("UPDATE mandria SET lat=:lat, lon=:lon, batteria=:bat, ultimo_aggiornamento=NOW() WHERE id=:id"),
+                        {"lat": lat, "lon": lon, "bat": bat, "id": dev_id}
+                    )
+                    s.commit()
+        except Exception:
+            pass
+
+    try:
+        client = mqtt.Client()
+        user_ttn = f"{st.secrets['TTN_APP_ID']}@ttn"
+        client.username_pw_set(user_ttn, st.secrets["TTN_API_KEY"])
+        client.on_message = on_message
+        client.connect(st.secrets["TTN_MQTT_HOST"], int(st.secrets["TTN_MQTT_PORT"]))
+        client.subscribe("#")
+        client.loop_forever()
+    except Exception:
+        pass
+
+# Avvio del Thread per MQTT (una sola volta)
+if 'mqtt_started' not in st.session_state:
+    thread = threading.Thread(target=avvia_ascolto_ttn, daemon=True)
+    thread.start()
+    st.session_state['mqtt_started'] = True
 
 # --- FUNZIONI ---
 def is_inside(lat, lon, polygon_coords):
@@ -17,48 +65,33 @@ def is_inside(lat, lon, polygon_coords):
     poly = Polygon(polygon_coords)
     return poly.contains(Point(lat, lon))
 
-#def invia_telegram(msg):
-#    try:
-#        token = st.secrets["TELEGRAM_TOKEN"].strip()
-#        chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
-#        url = f"https://api.telegram.org{token}/sendMessage"
-#        resp = requests.post(url, json={"chat_id": chat_id, "text": msg}, timeout=10)
-#        return resp.json()
-#    except Exception as e:
-#        return {"ok": False, "error": str(e)}
-
 def invia_telegram(msg):
     try:
         token = st.secrets["TELEGRAM_TOKEN"].strip()
         chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        url = f"https://api.telegram.org{token}/sendMessage"
         resp = requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=10)
         return resp.json()
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-
-# --- LOGICA DATI (Query su Supabase) ---
+# --- LOGICA DATI ---
 try:
-    # Caricamento recinto
     df_rec = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
     saved_coords = json.loads(df_rec.iloc[0]['coords']) if not df_rec.empty else []
-    
-    # Caricamento mandria
     df_mandria = conn.query("SELECT * FROM mandria", ttl=0)
 except Exception as e:
     st.error(f"Errore caricamento dati: {e}")
     df_mandria = pd.DataFrame()
     saved_coords = []
 
-st.set_page_config(layout="wide")
-st.title("🛰️ Monitoraggio Bovini - Satellitare (base1 supabase1)")
+st.title("🛰️ Monitoraggio Bovini - Satellitare (base1 supabase2)")
 
-# --- SIDEBAR: AGGIUNGI E RIMUOVI ---
+# --- SIDEBAR ---
 st.sidebar.header("📋 Gestione Mandria")
 
 with st.sidebar.expander("➕ Aggiungi Bovino"):
-    n_id = st.text_input("ID Tracker")
+    n_id = st.text_input("ID Tracker (deve corrispondere a TTN)")
     n_nome = st.text_input("Nome/Marca")
     if st.button("Salva"):
         if n_id and n_nome:
@@ -81,16 +114,14 @@ if not df_mandria.empty:
                 s.commit()
             st.rerun()
 
-# --- LAYOUT PRINCIPALE ---
+# --- LAYOUT ---
 col1, col2 = st.columns([3, 1])
 
 with col2:
     st.subheader("🧪 Test Telegram")
-    if st.button("Invia Messaggio di Prova"):
-        risultato = invia_telegram("👋 Test connessione riuscito su base1 supabase1!")
-        if risultato.get("ok"): st.success("✅ Inviato!")
-        else: st.error("❌ Errore")
-
+    if st.button("Invia Test"):
+        invia_telegram("👋 Test connessione riuscito!")
+    
     st.write("---")
     st.subheader("📍 Test Movimento")
     if not df_mandria.empty:
@@ -100,12 +131,10 @@ with col2:
         
         if st.button("Aggiorna Posizione"):
             bov_info = df_mandria[df_mandria['nome'] == bov_sel].iloc[0]
-            stato_vecchio = bov_info['stato_recinto']
-            
             nuovo_in = is_inside(n_lat, n_lon, saved_coords)
             stato_nuovo = "DENTRO" if nuovo_in else "FUORI"
             
-            if stato_vecchio == "DENTRO" and stato_nuovo == "FUORI":
+            if bov_info['stato_recinto'] == "DENTRO" and stato_nuovo == "FUORI":
                 invia_telegram(f"🚨 ALLARME: {bov_sel} è USCITO!")
             
             with conn.session as s:
@@ -118,10 +147,8 @@ with col2:
 
 with col1:
     m = folium.Map(location=[45.1743, 9.2394], zoom_start=16)
-    # --- URL SATELLITE CORRETTO ---
     folium.TileLayer(
-    #    tiles='https://mt1.google.com{x}&y={y}&z={z}',
-        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+        tiles='https://mt1.google.com{x}&y={y}&z={z}',
         attr='Google Satellite', name='Google Satellite', overlay=False, control=False
     ).add_to(m)
 
@@ -130,10 +157,9 @@ with col1:
 
     for i, row in df_mandria.iterrows():
         col_m = 'green' if row['stato_recinto'] == "DENTRO" else 'red'
-        folium.Marker([row['lat'], row['lon']], popup=row['nome'], icon=folium.Icon(color=col_m)).add_to(m)
+        folium.Marker([row['lat'], row['lon']], popup=f"{row['nome']} ({row['batteria']}%)", icon=folium.Icon(color=col_m)).add_to(m)
 
     Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
-    
     out = st_folium(m, width=800, height=550, key="main_map")
 
     if out and out.get('all_drawings'):
@@ -141,15 +167,10 @@ with col1:
         fixed_poly = [[p[1], p[0]] for p in new_poly]
         if st.button("Salva Recinto"):
             with conn.session as s:
-                s.execute(
-                    text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Recinto 1', :coords) "
-                         "ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"),
-                    {"coords": json.dumps(fixed_poly)}
-                )
+                s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Recinto 1', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), {"coords": json.dumps(fixed_poly)})
                 s.commit()
             st.rerun()
 
 st.write("---")
-st.subheader(f"📊 Lista Mandria")
-if not df_mandria.empty:
-    st.dataframe(df_mandria, use_container_width=True, hide_index=True)
+st.subheader("📊 Stato Mandria")
+st.dataframe(df_mandria, use_container_width=True, hide_index=True)
