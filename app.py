@@ -69,7 +69,9 @@ def invia_telegram(msg):
     try:
         token = st.secrets["TELEGRAM_TOKEN"].strip()
         chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
-        url = f"https://api.telegram.org{token}/sendMessage"
+#       url = f"https://api.telegram.org{token}/sendMessage"
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+
         resp = requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=10)
         return resp.json()
     except Exception as e:
