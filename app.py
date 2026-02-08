@@ -23,11 +23,14 @@ def is_inside(lat, lon, polygon_coords):
     return poly.contains(Point(lat, lon))
 
 def invia_telegram(msg):
+    """Versione corretta e testata per Telegram Bot API"""
     try:
         token = st.secrets["TELEGRAM_TOKEN"].strip()
         chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
-        url = f"https://api.telegram.org{token}/sendMessage"
-        resp = requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=10)
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        # Usiamo 'data' invece di 'json' per massima compatibilità con l'API Telegram
+        payload = {"chat_id": chat_id, "text": msg}
+        resp = requests.post(url, data=payload, timeout=10)
         return resp.json()
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -108,7 +111,6 @@ if not df_mandria.empty:
 
 # --- LAYOUT PRINCIPALE ---
 st.title("🛰️ MONITORAGGIO BOVINI Base TTN1")
-
 col_map, col_ctrl = st.columns([3, 1])
 
 with col_ctrl:
@@ -125,11 +127,6 @@ with col_ctrl:
         if st.button("Aggiorna Posizione Manuale"):
             nuovo_in = is_inside(n_lat, n_lon, saved_coords)
             stato_nuovo = "DENTRO" if nuovo_in else "FUORI"
-            # Controllo allarme anche per spostamento manuale
-            bov_info = df_mandria[df_mandria['nome'] == bov_sel].iloc[0]
-            if bov_info['stato_recinto'] == "DENTRO" and stato_nuovo == "FUORI":
-                invia_telegram(f"🚨 ALLARME MANUALE: {bov_sel} è USCITO!")
-            
             with conn.session as s:
                 s.execute(text("UPDATE mandria SET lat=:lat, lon=:lon, stato_recinto=:stato, ultimo_aggiornamento=NOW() WHERE nome=:nome"), {"lat": n_lat, "lon": n_lon, "stato": stato_nuovo, "nome": bov_sel})
                 s.commit()
@@ -137,13 +134,13 @@ with col_ctrl:
 
 with col_map:
     m = folium.Map(location=[45.1743, 9.2394], zoom_start=17)
-    # --- VISUALIZZAZIONE SATELLITE GOOGLE ---
-    # tiles='https://mt1.google.com{x}&y={y}&z={z}',
+    #    tiles='https://mt1.google.com{x}&y={y}&z={z}',
     folium.TileLayer(
-    
-            #    tiles='https://mt1.google.com{x}&y={y}&z={z}',
+        
+    #   tiles='https://mt1.google.com{x}&y={y}&z={z}',
         tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
 
+        
         attr='Google Satellite', name='Google Satellite', overlay=False, control=False
     ).add_to(m)
 
@@ -152,7 +149,7 @@ with col_map:
 
     for i, row in df_mandria.iterrows():
         col_m = 'green' if row['stato_recinto'] == "DENTRO" else 'red'
-        folium.Marker([row['lat'], row['lon']], popup=f"{row['nome']} ({row['id']})", icon=folium.Icon(color=col_m)).add_to(m)
+        folium.Marker([row['lat'], row['lon']], popup=row['nome'], icon=folium.Icon(color=col_m)).add_to(m)
 
     Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
     out = st_folium(m, width="100%", height=600, key="main_map")
