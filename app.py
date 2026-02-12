@@ -77,8 +77,7 @@ with col_map:
     
     # Layer Satellite Google
     folium.TileLayer(
-        tiles='https://mt1.google.com{x}&y={y}&z={z}',
-        
+             
     #   tiles='https://mt1.google.com{x}&y={y}&z={z}',
         tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
  
