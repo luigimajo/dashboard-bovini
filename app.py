@@ -8,44 +8,67 @@ from sqlalchemy import text
 from streamlit_autorefresh import st_autorefresh
 
 # --- CONFIGURAZIONE PAGINA ---
-st.set_page_config(layout="wide", page_title="MONITORAGGIO BOVINI - Cloud Mode")
+st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# Aggiornamento automatico ogni 30 secondi
+# Aggiornamento automatico della dashboard ogni 30 secondi
 st_autorefresh(interval=30000, key="datarefresh")
 
-# Connessione a Supabase
+# Connessione a Supabase tramite SQLAlchemy
 conn = st.connection("postgresql", type="sql")
 
-# --- CARICAMENTO DATI ---
-def get_data():
+# --- FUNZIONI CARICAMENTO DATI ---
+def load_data():
     try:
-        # Carichiamo la mandria
-        df = conn.query("SELECT * FROM mandria ORDER BY id", ttl=0)
-        # Carichiamo il recinto
-        df_rec = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
-        coords = json.loads(df_rec.iloc[0]['coords']) if not df_rec.empty else []
-        return df, coords
+        # Carichiamo i Bovini
+        df_m = conn.query("SELECT * FROM mandria ORDER BY nome ASC", ttl=0)
+        # Carichiamo i Gateway
+        df_g = conn.query("SELECT * FROM gateway ORDER BY ultima_attivita DESC", ttl=0)
+        # Carichiamo il Recinto
+        df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
+        coords = json.loads(df_r.iloc[0]['coords']) if not df_r.empty else []
+        return df_m, df_g, coords
     except Exception as e:
-        return pd.DataFrame(), []
+        st.error(f"Errore database: {e}")
+        return pd.DataFrame(), pd.DataFrame(), []
 
-df_mandria, saved_coords = get_data()
+df_mandria, df_gateways, saved_coords = load_data()
 
-# --- SIDEBAR: GESTIONE ANAGRAFICA ---
-st.sidebar.header("📋 GESTIONE MANDRIA")
+# --- SIDEBAR: STATO INFRASTRUTTURA (GATEWAY) ---
+st.sidebar.header("📡 STATO RETE LORA")
+if not df_gateways.empty:
+    for _, g in df_gateways.iterrows():
+        status_color = "#28a745" if g['stato'] == 'ONLINE' else "#dc3545"
+        icon = "✅" if g['stato'] == 'ONLINE' else "❌"
+        st.sidebar.markdown(f"""
+            <div style="border-left: 5px solid {status_color}; padding: 10px; background-color: rgba(255,255,255,0.05); border-radius: 5px; margin-bottom: 10px;">
+                <b style="font-size: 14px;">{icon} {g['nome']}</b><br>
+                <small>Stato: {g['stato']}</small><br>
+                <small>Ultimo segnale: {g['ultima_attivita'].strftime('%H:%M:%S')}</small>
+            </div>
+        """, unsafe_allow_html=True)
+else:
+    st.sidebar.info("Nessun Gateway configurato.")
 
+with st.sidebar.expander("➕ Configura Nuovo Gateway"):
+    g_id = st.text_input("ID Gateway (da TTN)")
+    g_nome = st.text_input("Nome Località (es. Stalla Alta)")
+    if st.button("Registra Gateway"):
+        if g_id and g_nome:
+            with conn.session as s:
+                s.execute(text("INSERT INTO gateway (id, nome, stato) VALUES (:id, :nome, 'ONLINE')"), {"id": g_id, "nome": g_nome})
+                s.commit()
+            st.rerun()
+
+# --- SIDEBAR: GESTIONE MANDRIA ---
+st.sidebar.markdown("---")
+st.sidebar.header("📋 GESTIONE BOVINI")
 with st.sidebar.expander("➕ Aggiungi Bovino"):
     n_id = st.text_input("ID Tracker (es. tracker-luigi)")
-    n_nome = st.text_input("Nome/Marca")
+    n_nome = st.text_input("Nome Animale")
     if st.button("Salva Bovino"):
         if n_id and n_nome:
             with conn.session as s:
-                # Inseriamo coordinate nulle invece di 0,0 per evitare l'Atlantico
-                s.execute(
-                    text("INSERT INTO mandria (id, nome, lat, lon, stato_recinto, batteria) "
-                         "VALUES (:id, :nome, NULL, NULL, 'DENTRO', 100) "
-                         "ON CONFLICT (id) DO UPDATE SET nome = EXCLUDED.nome"),
-                    {"id": n_id, "nome": n_nome}
-                )
+                s.execute(text("INSERT INTO mandria (id, nome, lat, lon, stato_recinto) VALUES (:id, :nome, NULL, NULL, 'DENTRO') ON CONFLICT (id) DO UPDATE SET nome = EXCLUDED.nome"), {"id": n_id, "nome": n_nome})
                 s.commit()
             st.rerun()
 
@@ -58,88 +81,75 @@ if not df_mandria.empty:
                 s.commit()
             st.rerun()
 
-# --- LOGICA COORDINATE MAPPA ---
-# Escludiamo i valori nulli o 0.0 dal calcolo del centro mappa
-df_posizionati = df_mandria.dropna(subset=['lat', 'lon'])
-df_posizionati = df_posizionati[(df_posizionati['lat'] != 0) & (df_posizionati['lon'] != 0)]
+# --- LOGICA MAPPA ---
+# Escludiamo punti 0,0 o NULL per centrare la mappa
+df_valid = df_mandria.dropna(subset=['lat', 'lon'])
+df_valid = df_valid[(df_valid['lat'] != 0) & (df_valid['lon'] != 0)]
 
-if not df_posizionati.empty:
-    center_lat = df_posizionati['lat'].mean()
-    center_lon = df_posizionati['lon'].mean()
+if not df_valid.empty:
+    c_lat, c_lon = df_valid['lat'].mean(), df_valid['lon'].mean()
 else:
-    # Se non ci sono bovini con segnale GPS, centra sulla tua zona (es. Sicilia o tua stalla)
-    center_lat, center_lon = 45.1743, 9.2394 
+    c_lat, c_lon = 45.1743, 9.2394 # Coordinate di default (cambiale se necessario)
+
+# Creazione Oggetto Folium
+m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
+
+# Layer Satellite Google
+folium.TileLayer(
+
+#   tiles='https://mt1.google.com{x}&y={y}&z={z}',
+    tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+
+    attr='Google Satellite',
+    name='Google Satellite',
+    overlay=False,
+    control=False
+).add_to(m)
+
+# Disegno Recinto
+if saved_coords:
+    folium.Polygon(locations=saved_coords, color="yellow", weight=3, fill=True, fill_opacity=0.2).add_to(m)
+
+# Marker Bovini
+for _, row in df_mandria.iterrows():
+    if pd.notna(row['lat']) and row['lat'] != 0:
+        color = 'green' if row['stato_recinto'] == 'DENTRO' else 'red'
+        folium.Marker(
+            [row['lat'], row['lon']],
+            popup=f"<b>{row['nome']}</b><br>Batteria: {row['batteria']}%<br>Stato: {row['stato_recinto']}",
+            icon=folium.Icon(color=color, icon='info-sign')
+        ).add_to(m)
+
+# Strumento Disegno
+Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
 
 # --- LAYOUT PRINCIPALE ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
+st.info("I dati vengono ricevuti e processati da Supabase anche quando questa pagina è chiusa.")
 
 col_map, col_table = st.columns([3, 1])
 
 with col_map:
-    # Creazione mappa base
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=17, tiles=None)
-
-    # Vista Satellite Google
-    folium.TileLayer(
-        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-        attr='Google Satellite',
-        name='Google Satellite',
-        overlay=False,
-        control=False
-    ).add_to(m)
-
-    # Disegna Recinto
-    if saved_coords:
-        folium.Polygon(
-            locations=saved_coords,
-            color="yellow",
-            weight=4,
-            fill=True,
-            fill_opacity=0.2
-        ).add_to(m)
-
-    # Disegna Bovini
-    for _, row in df_mandria.iterrows():
-        # Saltiamo il marker se non c'è ancora una posizione valida
-        if pd.isna(row['lat']) or row['lat'] == 0:
-            continue
-            
-        col_m = 'green' if row['stato_recinto'] == "DENTRO" else 'red'
-        folium.Marker(
-            [row['lat'], row['lon']], 
-            popup=f"{row['nome']} ({row['batteria']}%)",
-            icon=folium.Icon(color=col_m, icon='info-sign')
-        ).add_to(m)
-
-    # Strumento per disegnare
-    Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
+    out = st_folium(m, width="100%", height=650, key="main_map")
     
-    # Render Mappa
-    out = st_folium(m, width="100%", height=600, key="main_map")
-
-    # Logica salvataggio recinto (inverte Lon/Lat del disegno in Lat/Lon per Folium)
+    # Salvataggio Recinto
     if out and out.get('all_drawings'):
-        # Prendiamo l'ultimo disegno
         raw_coords = out['all_drawings'][-1]['geometry']['coordinates'][0]
-        # Invertiamo ogni coppia da [Lon, Lat] a [Lat, Lon]
-        new_poly = [[p[1], p[0]] for p in raw_coords]
-        
-        if st.button("💾 Salva Nuovo Recinto"):
+        new_poly = [[p[1], p[0]] for p in raw_coords] # Inversione Lon/Lat -> Lat/Lon
+        if st.button("💾 Conferma e Salva Nuovo Recinto"):
             with conn.session as s:
-                s.execute(
-                    text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"),
-                    {"coords": json.dumps(new_poly)}
-                )
+                s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), {"coords": json.dumps(new_poly)})
                 s.commit()
-            st.success("Recinto salvato correttamente!")
+            st.success("Recinto aggiornato!")
             st.rerun()
 
 with col_table:
-    st.subheader("📊 Stato")
+    st.subheader("📊 Stato Mandria")
     if not df_mandria.empty:
-        st.dataframe(df_mandria[['nome', 'stato_recinto', 'batteria']], hide_index=True)
+        st.dataframe(df_mandria[['nome', 'stato_recinto', 'batteria']], hide_index=True, use_container_width=True)
     else:
-        st.write("Mandria vuota")
+        st.write("Nessun dato.")
 
 st.write("---")
-st.dataframe(df_mandria, use_container_width=True)
+st.subheader("📝 Storico Aggiornamenti")
+st.dataframe(df_mandria, use_container_width=True, hide_index=True)
