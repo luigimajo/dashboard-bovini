@@ -89,7 +89,7 @@ df_valid = df_valid[(df_valid['lat'] != 0) & (df_valid['lon'] != 0)]
 if not df_valid.empty:
     c_lat, c_lon = df_valid['lat'].mean(), df_valid['lon'].mean()
 else:
-    c_lat, c_lon = 45.1743, 9.2394 # Coordinate di default (cambiale se necessario)
+    c_lat, c_lon = 37.9747, 13.5753 # Coordinate di default (cambiale se necessario   37.97477189110554, 13.575302661571639)
 
 # Creazione Oggetto Folium
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
