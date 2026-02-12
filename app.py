@@ -2,104 +2,57 @@ import streamlit as st
 import folium
 from streamlit_folium import st_folium
 from folium.plugins import Draw
-from shapely.geometry import Point, Polygon
 import json
 import pandas as pd
-import requests
 from sqlalchemy import text
-import paho.mqtt.client as mqtt
-import threading
 from streamlit_autorefresh import st_autorefresh
 
 # --- CONFIGURAZIONE PAGINA ---
-st.set_page_config(layout="wide", page_title="MONITORAGGIO BOVINI Base TTN1")
+st.set_page_config(layout="wide", page_title="MONITORAGGIO BOVINI - Cloud Mode")
+
+# Aggiorna l'interfaccia ogni 30 secondi per mostrare le nuove posizioni ricevute da TTN
 st_autorefresh(interval=30000, key="datarefresh")
+
+# Connessione al database Supabase (usa i secrets configurati)
 conn = st.connection("postgresql", type="sql")
 
-# --- FUNZIONI CORE ---
-def is_inside(lat, lon, polygon_coords):
-    if not polygon_coords or len(polygon_coords) < 3: return True
-    poly = Polygon(polygon_coords)
-    return poly.contains(Point(lat, lon))
-
-def invia_telegram(msg):
-    """Versione corretta e testata per Telegram Bot API"""
-    try:
-        token = st.secrets["TELEGRAM_TOKEN"].strip()
-        chat_id = st.secrets["TELEGRAM_CHAT_ID"].strip()
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        # Usiamo 'data' invece di 'json' per massima compatibilità con l'API Telegram
-        payload = {"chat_id": chat_id, "text": msg}
-        resp = requests.post(url, data=payload, timeout=10)
-        return resp.json()
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-# --- BRIDGE MQTT (ASCOLTO TTN H24) ---
-def avvia_ascolto_ttn():
-    def on_message(client, userdata, msg):
-        try:
-            payload = json.loads(msg.payload)
-            dev_id = payload['end_device_ids']['device_id']
-            decoded = payload['uplink_message'].get('decoded_payload', {})
-            lat, lon = decoded.get('latitude'), decoded.get('longitude')
-            bat = decoded.get('battery_percent', 100)
-
-            if lat and lon:
-                with conn.session as s:
-                    res_rec = s.execute(text("SELECT coords FROM recinti WHERE id = 1")).fetchone()
-                    saved_coords = json.loads(res_rec[0]) if res_rec else []
-                    res_bov = s.execute(text("SELECT nome, stato_recinto FROM mandria WHERE id = :id"), {"id": dev_id}).fetchone()
-                    
-                    if res_bov:
-                        nome_bov, stato_vecchio = res_bov
-                        nuovo_in = is_inside(lat, lon, saved_coords)
-                        stato_nuovo = "DENTRO" if nuovo_in else "FUORI"
-                        
-                        if stato_vecchio == "DENTRO" and stato_nuovo == "FUORI":
-                            invia_telegram(f"🚨 ALLARME AUTOMATICO: {nome_bov} è USCITO!")
-
-                        s.execute(
-                            text("UPDATE mandria SET lat=:lat, lon=:lon, batteria=:bat, stato_recinto=:stato, ultimo_aggiornamento=NOW() WHERE id=:id"),
-                            {"lat": lat, "lon": lon, "bat": bat, "stato": stato_nuovo, "id": dev_id}
-                        )
-                        s.commit()
-        except: pass
-
-    try:
-        client = mqtt.Client()
-        user_ttn = f"{st.secrets['TTN_APP_ID']}@ttn"
-        client.username_pw_set(user_ttn, st.secrets["TTN_API_KEY"])
-        client.on_message = on_message
-        client.connect(st.secrets["TTN_MQTT_HOST"], int(st.secrets["TTN_MQTT_PORT"]))
-        client.subscribe("#")
-        client.loop_forever()
-    except: pass
-
-if 'mqtt_started' not in st.session_state:
-    threading.Thread(target=avvia_ascolto_ttn, daemon=True).start()
-    st.session_state['mqtt_started'] = True
-
 # --- CARICAMENTO DATI ---
-try:
-    df_rec = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
-    saved_coords = json.loads(df_rec.iloc[0]['coords']) if not df_rec.empty else []
-    df_mandria = conn.query("SELECT * FROM mandria", ttl=0)
-except Exception:
-    df_mandria, saved_coords = pd.DataFrame(), []
+def get_data():
+    try:
+        # Carichiamo lo stato aggiornato della mandria (scritto dal Webhook di TTN)
+        df = conn.query("SELECT * FROM mandria ORDER BY id", ttl=0)
+        
+        # Carichiamo il recinto esistente
+        df_rec = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
+        coords = json.loads(df_rec.iloc[0]['coords']) if not df_rec.empty else []
+        
+        return df, coords
+    except Exception as e:
+        st.error(f"Errore caricamento dati: {e}")
+        return pd.DataFrame(), []
 
-# --- SIDEBAR (GESTIONE MANDRIA) ---
+df_mandria, saved_coords = get_data()
+
+# --- SIDEBAR: GESTIONE ANAGRAFICA ---
 st.sidebar.header("📋 GESTIONE MANDRIA")
+
+# Aggiunta nuovo tracker
 with st.sidebar.expander("➕ Aggiungi Bovino"):
-    n_id = st.text_input("ID Tracker (TTN)")
-    n_nome = st.text_input("Nome/Marca")
-    if st.button("Salva"):
+    n_id = st.text_input("ID Tracker (es. tracker-luigi)")
+    n_nome = st.text_input("Nome/Marca Auricolare")
+    if st.button("Salva Bovino"):
         if n_id and n_nome:
             with conn.session as s:
-                s.execute(text("INSERT INTO mandria (id, nome, lat, lon, stato_recinto, batteria, allarme_attivo) VALUES (:id, :nome, 45.1743, 9.2394, 'DENTRO', 100, True) ON CONFLICT (id) DO UPDATE SET nome = EXCLUDED.nome"), {"id": n_id, "nome": n_nome})
+                s.execute(
+                    text("INSERT INTO mandria (id, nome, lat, lon, stato_recinto, batteria) "
+                         "VALUES (:id, :nome, 0, 0, 'DENTRO', 100) "
+                         "ON CONFLICT (id) DO UPDATE SET nome = EXCLUDED.nome"),
+                    {"id": n_id, "nome": n_nome}
+                )
                 s.commit()
             st.rerun()
 
+# Rimozione tracker
 if not df_mandria.empty:
     with st.sidebar.expander("🗑️ Rimuovi Bovino"):
         bov_del = st.selectbox("Seleziona da eliminare:", df_mandria['nome'].tolist())
@@ -110,57 +63,88 @@ if not df_mandria.empty:
             st.rerun()
 
 # --- LAYOUT PRINCIPALE ---
-st.title("🛰️ MONITORAGGIO BOVINI Base TTN1")
-col_map, col_ctrl = st.columns([3, 1])
+st.title("🛰️ MONITORAGGIO BOVINI H24")
+st.info("Il sistema riceve i dati dai gateway Dragino anche se questa pagina è chiusa.")
 
-with col_ctrl:
-    st.subheader("🧪 Test Telegram")
-    if st.button("Invia Test"):
-        invia_telegram("👋 Test manuale riuscito su MONITORAGGIO BOVINI Base TTN1!")
-    
-    st.write("---")
-    if not df_mandria.empty:
-        st.subheader("📍 Test Movimento")
-        bov_sel = st.selectbox("Sposta:", df_mandria['nome'].tolist())
-        n_lat = st.number_input("Lat", value=45.1743, format="%.6f")
-        n_lon = st.number_input("Lon", value=9.2394, format="%.6f")
-        if st.button("Aggiorna Posizione Manuale"):
-            nuovo_in = is_inside(n_lat, n_lon, saved_coords)
-            stato_nuovo = "DENTRO" if nuovo_in else "FUORI"
-            with conn.session as s:
-                s.execute(text("UPDATE mandria SET lat=:lat, lon=:lon, stato_recinto=:stato, ultimo_aggiornamento=NOW() WHERE nome=:nome"), {"lat": n_lat, "lon": n_lon, "stato": stato_nuovo, "nome": bov_sel})
-                s.commit()
-            st.rerun()
+col_map, col_table = st.columns([3, 1])
 
 with col_map:
-    m = folium.Map(location=[45.1743, 9.2394], zoom_start=17)
-    #    tiles='https://mt1.google.com{x}&y={y}&z={z}',
+    # Centriamo la mappa sull'ultima posizione nota o su una coordinata di default
+    start_lat = df_mandria['lat'].mean() if not df_mandria.empty else 45.1743
+    start_lon = df_mandria['lon'].mean() if not df_mandria.empty else 9.2394
+    
+    m = folium.Map(location=[start_lat, start_lon], zoom_start=16)
+    
+    # Layer Satellite Google
     folium.TileLayer(
-        
-    #   tiles='https://mt1.google.com{x}&y={y}&z={z}',
-        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-
-        
-        attr='Google Satellite', name='Google Satellite', overlay=False, control=False
+        tiles='https://mt1.google.com{x}&y={y}&z={z}',
+        attr='Google Satellite',
+        name='Google Satellite',
+        overlay=False,
+        control=False
     ).add_to(m)
 
+    # Disegna il recinto salvato
     if saved_coords:
-        folium.Polygon(locations=saved_coords, color="yellow", weight=5, fill=True, fill_opacity=0.2).add_to(m)
+        folium.Polygon(
+            locations=saved_coords,
+            color="yellow",
+            weight=3,
+            fill=True,
+            fill_opacity=0.2,
+            popup="Area Pascolo"
+        ).add_to(m)
 
-    for i, row in df_mandria.iterrows():
+    # Posiziona i bovini sulla mappa
+    for _, row in df_mandria.iterrows():
+        # Colore marker basato sullo stato calcolato da Supabase
         col_m = 'green' if row['stato_recinto'] == "DENTRO" else 'red'
-        folium.Marker([row['lat'], row['lon']], popup=row['nome'], icon=folium.Icon(color=col_m)).add_to(m)
+        
+        info_popup = f"<b>{row['nome']}</b><br>Batteria: {row['batteria']}%<br>Aggiornato: {row['ultimo_aggiornamento']}"
+        
+        folium.Marker(
+            [row['lat'], row['lon']], 
+            popup=info_popup,
+            tooltip=row['nome'],
+            icon=folium.Icon(color=col_m, icon='info-sign')
+        ).add_to(m)
 
-    Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
+    # Strumento per disegnare nuovi recinti
+    Draw(draw_options={
+        'polyline':False, 'rectangle':False, 'circle':False, 'marker':False, 'circlemarker':False, 'polygon':True
+    }).add_to(m)
+    
+    # Visualizzazione mappa
     out = st_folium(m, width="100%", height=600, key="main_map")
 
+    # Salvataggio nuovo recinto disegnato
     if out and out.get('all_drawings'):
+        # Estraiamo le coordinate (invertendo lat/lon da GeoJSON a Folium)
         new_poly = [[p[1], p[0]] for p in out['all_drawings'][-1]['geometry']['coordinates'][0]]
-        if st.button("Salva Recinto"):
+        if st.button("💾 Salva Nuovo Recinto"):
             with conn.session as s:
-                s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Recinto 1', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), {"coords": json.dumps(new_poly)})
+                s.execute(
+                    text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Recinto Principale', :coords) "
+                         "ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"),
+                    {"coords": json.dumps(new_poly)}
+                )
                 s.commit()
+            st.success("Recinto aggiornato! Il database ricalcolerà gli allarmi automaticamente.")
             st.rerun()
 
+with col_table:
+    st.subheader("📊 Stato Mandria")
+    if not df_mandria.empty:
+        # Mostriamo una versione compatta della tabella
+        st.dataframe(
+            df_mandria[['nome', 'stato_recinto', 'batteria']], 
+            hide_index=True,
+            use_container_width=True
+        )
+    else:
+        st.write("Nessun tracker registrato.")
+
 st.write("---")
+# Log completo in fondo alla pagina
+st.subheader("📝 Dettaglio Ultimi Aggiornamenti")
 st.dataframe(df_mandria, use_container_width=True, hide_index=True)
