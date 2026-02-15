@@ -144,11 +144,32 @@ with col_map:
             st.rerun()
 
 with col_table:
-    st.subheader("📊 Stato Mandria")
-    if not df_mandria.empty:
-        st.dataframe(df_mandria[['nome', 'stato_recinto', 'batteria']], hide_index=True, use_container_width=True)
+    st.subheader("🚨 Bovini in Allarme")
+    
+    # Filtriamo il dataframe: prendiamo solo quelli con stato 'FUORI'
+    df_allarme = df_mandria[df_mandria['stato_recinto'] == 'FUORI']
+    
+    if not df_allarme.empty:
+        # Mostriamo la tabella con i soli fuggitivi
+        st.error(f"Attenzione: ci sono {len(df_allarme)} bovini fuori recinto!")
+        st.dataframe(
+            df_allarme[['nome', 'batteria', 'ultimo_aggiornamento']], 
+            hide_index=True, 
+            use_container_width=True
+        )
+        
+        # Opzione: un pulsante per centrare la mappa sul primo fuggitivo
+        if st.button("Individua fuggitivi sulla mappa"):
+            st.info("I marker rossi indicano la loro posizione attuale.")
     else:
-        st.write("Nessun dato.")
+        # Se non c'è nessuno fuori, mostriamo un messaggio rassicurante
+        st.success("✅ Tutti i bovini sono all'interno del recinto.")
+        st.write("Nessun allarme attivo al momento.")
+
+    # Sotto, se vuoi, puoi comunque tenere una piccola lista espandibile per tutti gli altri
+    with st.expander("🔍 Vedi elenco completo mandria"):
+        st.dataframe(df_mandria[['nome', 'stato_recinto', 'batteria']], hide_index=True)
+
 
 st.write("---")
 st.subheader("📝 Storico Aggiornamenti")
