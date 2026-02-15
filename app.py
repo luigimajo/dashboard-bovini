@@ -144,31 +144,43 @@ with col_map:
             st.rerun()
 
 with col_table:
-    st.subheader("🚨 Bovini in Allarme")
+    st.subheader("⚠️ Avvisi Critici")
+
+    # 1. FILTRO FUGGITIVI (Stato FUORI)
+    df_fuori = df_mandria[df_mandria['stato_recinto'] == 'FUORI']
     
-    # Filtriamo il dataframe: prendiamo solo quelli con stato 'FUORI'
-    df_allarme = df_mandria[df_mandria['stato_recinto'] == 'FUORI']
-    
-    if not df_allarme.empty:
-        # Mostriamo la tabella con i soli fuggitivi
-        st.error(f"Attenzione: ci sono {len(df_allarme)} bovini fuori recinto!")
+    # 2. FILTRO BATTERIA SCARICA (Sotto 20%)
+    # Assicuriamoci che la colonna batteria sia numerica per il calcolo
+    df_mandria['batteria'] = pd.to_numeric(df_mandria['batteria'], errors='coerce')
+    df_scarichi = df_mandria[df_mandria['batteria'] <= 20]
+
+    # --- VISUALIZZAZIONE FUGGITIVI ---
+    if not df_fuori.empty:
+        st.error(f"🚨 {len(df_fuori)} Bovini fuori recinto!")
         st.dataframe(
-            df_allarme[['nome', 'batteria', 'ultimo_aggiornamento']], 
+            df_fuori[['nome', 'ultimo_aggiornamento']], 
             hide_index=True, 
             use_container_width=True
         )
-        
-        # Opzione: un pulsante per centrare la mappa sul primo fuggitivo
-        if st.button("Individua fuggitivi sulla mappa"):
-            st.info("I marker rossi indicano la loro posizione attuale.")
-    else:
-        # Se non c'è nessuno fuori, mostriamo un messaggio rassicurante
-        st.success("✅ Tutti i bovini sono all'interno del recinto.")
-        st.write("Nessun allarme attivo al momento.")
+    
+    # --- VISUALIZZAZIONE BATTERIA ---
+    if not df_scarichi.empty:
+        st.warning(f"🪫 {len(df_scarichi)} Tracker in esaurimento (<20%)")
+        st.dataframe(
+            df_scarichi[['nome', 'batteria']], 
+            hide_index=True, 
+            use_container_width=True
+        )
 
-    # Sotto, se vuoi, puoi comunque tenere una piccola lista espandibile per tutti gli altri
-    with st.expander("🔍 Vedi elenco completo mandria"):
-        st.dataframe(df_mandria[['nome', 'stato_recinto', 'batteria']], hide_index=True)
+    # --- MESSAGGIO SE TUTTO OK ---
+    if df_fuori.empty and df_scarichi.empty:
+        st.success("✅ Mandria in sicurezza e batterie cariche.")
+        st.balloons() # Un piccolo effetto grafico opzionale quando tutto è perfetto!
+
+    # Elenco completo in fondo, compresso
+    with st.expander("📋 Elenco completo mandria"):
+        # Ordiniamo per nome
+        st.dataframe(df_mandria.sort_values(by='nome')[['nome', 'stato_recinto', 'batteria']], hide_index=True)
 
 
 st.write("---")
