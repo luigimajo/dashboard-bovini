@@ -1,4 +1,4 @@
-import streamlit as st
+import streamlit as st 
 import folium
 from streamlit_folium import st_folium
 from folium.plugins import Draw
@@ -10,8 +10,14 @@ from streamlit_autorefresh import st_autorefresh
 # --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
+# >>> MODIFICA (1/4): stato per capire se sei in edit poligono
+if "editing_poly" not in st.session_state:
+    st.session_state["editing_poly"] = False
+
 # Aggiornamento automatico della dashboard ogni 30 secondi
-st_autorefresh(interval=30000, key="datarefresh")
+# >>> MODIFICA (2/4): disabilita refresh quando sei in edit poligono
+if not st.session_state["editing_poly"]:
+    st_autorefresh(interval=30000, key="datarefresh")
 
 # Connessione a Supabase tramite SQLAlchemy
 conn = st.connection("postgresql", type="sql")
@@ -131,6 +137,12 @@ col_map, col_table = st.columns([3, 1])
 
 with col_map:
     out = st_folium(m, width="100%", height=650, key="main_map")
+
+    # >>> MODIFICA (3/4): se c'è un disegno non salvato, blocca refresh
+    if out and out.get('all_drawings'):
+        st.session_state["editing_poly"] = True
+    else:
+        st.session_state["editing_poly"] = False
     
     # Salvataggio Recinto
     if out and out.get('all_drawings'):
@@ -141,6 +153,8 @@ with col_map:
                 s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), {"coords": json.dumps(new_poly)})
                 s.commit()
             st.success("Recinto aggiornato!")
+            # >>> MODIFICA (4/4): riabilita refresh dopo salvataggio
+            st.session_state["editing_poly"] = False
             st.rerun()
 
 with col_table:
