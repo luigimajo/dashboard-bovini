@@ -10,12 +10,11 @@ from streamlit_autorefresh import st_autorefresh
 # --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# >>> MODIFICA (1/4): stato per capire se sei in edit poligono
+# --- STATO EDIT RECINTO (pausa refresh durante disegno) ---
 if "editing_poly" not in st.session_state:
     st.session_state["editing_poly"] = False
 
-# Aggiornamento automatico della dashboard ogni 30 secondi
-# >>> MODIFICA (2/4): disabilita refresh quando sei in edit poligono
+# Aggiornamento automatico della dashboard ogni 30 secondi (disabilitato in edit)
 if not st.session_state["editing_poly"]:
     st_autorefresh(interval=30000, key="datarefresh")
 
@@ -102,10 +101,8 @@ m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
 # Layer Satellite Google
 folium.TileLayer(
-
 #   tiles='https://mt1.google.com{x}&y={y}&z={z}',
     tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-
     attr='Google Satellite',
     name='Google Satellite',
     overlay=False,
@@ -126,23 +123,33 @@ for _, row in df_mandria.iterrows():
             icon=folium.Icon(color=color, icon='info-sign')
         ).add_to(m)
 
-# Strumento Disegno
+# Strumento Disegno (lasciato invariato)
 Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
 
 # --- LAYOUT PRINCIPALE ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
 st.info("I dati vengono ricevuti e processati da Supabase anche quando questa pagina è chiusa.")
 
+# --- CONTROLLO MODALITÀ EDIT (pausa refresh) ---
+colA, colB, colC = st.columns([1, 1, 3])
+with colA:
+    if not st.session_state["editing_poly"]:
+        if st.button("✏️ Modifica recinto (pausa refresh)"):
+            st.session_state["editing_poly"] = True
+            st.rerun()
+with colB:
+    if st.session_state["editing_poly"]:
+        if st.button("❌ Annulla modifica"):
+            st.session_state["editing_poly"] = False
+            st.rerun()
+
+if st.session_state["editing_poly"]:
+    st.warning("Modalità modifica attiva: refresh automatico DISABILITATO finché non salvi o annulli.")
+
 col_map, col_table = st.columns([3, 1])
 
 with col_map:
     out = st_folium(m, width="100%", height=650, key="main_map")
-
-    # >>> MODIFICA (3/4): se c'è un disegno non salvato, blocca refresh
-    if out and out.get('all_drawings'):
-        st.session_state["editing_poly"] = True
-    else:
-        st.session_state["editing_poly"] = False
     
     # Salvataggio Recinto
     if out and out.get('all_drawings'):
@@ -150,10 +157,13 @@ with col_map:
         new_poly = [[p[1], p[0]] for p in raw_coords] # Inversione Lon/Lat -> Lat/Lon
         if st.button("💾 Conferma e Salva Nuovo Recinto"):
             with conn.session as s:
-                s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), {"coords": json.dumps(new_poly)})
+                s.execute(
+                    text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) "
+                         "ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"),
+                    {"coords": json.dumps(new_poly)}
+                )
                 s.commit()
             st.success("Recinto aggiornato!")
-            # >>> MODIFICA (4/4): riabilita refresh dopo salvataggio
             st.session_state["editing_poly"] = False
             st.rerun()
 
