@@ -30,7 +30,7 @@ def load_data():
 
 df_mandria, df_gateways, saved_coords = load_data()
 
-# --- SIDEBAR (Invariata) ---
+# --- SIDEBAR: STATO INFRASTRUTTURA ---
 st.sidebar.header("📡 STATO RETE LORA")
 if not df_gateways.empty:
     for _, g in df_gateways.iterrows():
@@ -43,139 +43,105 @@ if not df_gateways.empty:
                 <small>Ultimo segnale: {g['ultima_attivita'].strftime('%H:%M:%S')}</small>
             </div>
         """, unsafe_allow_html=True)
-else:
-    st.sidebar.info("Nessun Gateway configurato.")
 
-with st.sidebar.expander("➕ Configura Nuovo Gateway"):
-    g_id = st.text_input("ID Gateway (da TTN)")
-    g_nome = st.text_input("Nome Località (es. Stalla Alta)")
-    if st.button("Registra Gateway"):
-        if g_id and g_nome:
-            with conn.session as s:
-                s.execute(text("INSERT INTO gateway (id, nome, stato) VALUES (:id, :nome, 'ONLINE')"), {"id": g_id, "nome": g_nome})
-                s.commit()
-            st.rerun()
-
+# --- SIDEBAR: GESTIONE MANDRIA ---
 st.sidebar.markdown("---")
 st.sidebar.header("📋 GESTIONE BOVINI")
-with st.sidebar.expander("➕ Aggiungi Bovino"):
-    n_id = st.text_input("ID Tracker (es. tracker-luigi)")
+with st.sidebar.expander("➕ Aggiungi/Rimuovi"):
+    n_id = st.text_input("ID Tracker")
     n_nome = st.text_input("Nome Animale")
     if st.button("Salva Bovino"):
-        if n_id and n_nome:
-            with conn.session as s:
-                s.execute(text("INSERT INTO mandria (id, nome, lat, lon, stato_recinto) VALUES (:id, :nome, NULL, NULL, 'DENTRO') ON CONFLICT (id) DO UPDATE SET nome = EXCLUDED.nome"), {"id": n_id, "nome": n_nome})
-                s.commit()
-            st.rerun()
-
-if not df_mandria.empty:
-    with st.sidebar.expander("🗑️ Rimuovi Bovino"):
-        bov_del = st.selectbox("Seleziona da eliminare:", df_mandria['nome'].tolist())
-        if st.button("Elimina"):
-            with conn.session as s:
-                s.execute(text("DELETE FROM mandria WHERE nome=:nome"), {"nome": bov_del})
-                s.commit()
-            st.rerun()
+        with conn.session as s:
+            s.execute(text("INSERT INTO mandria (id, nome, stato_recinto) VALUES (:id, :nome, 'DENTRO') ON CONFLICT (id) DO UPDATE SET nome = EXCLUDED.nome"), {"id": n_id, "nome": n_nome})
+            s.commit()
+        st.rerun()
 
 # --- LOGICA MAPPA ---
 df_valid = df_mandria.dropna(subset=['lat', 'lon'])
 df_valid = df_valid[(df_valid['lat'] != 0) & (df_valid['lon'] != 0)]
+c_lat, c_lon = (df_valid['lat'].mean(), df_valid['lon'].mean()) if not df_valid.empty else (37.9747, 13.5753)
 
-if not df_valid.empty:
-    c_lat, c_lon = df_valid['lat'].mean(), df_valid['lon'].mean()
-else:
-    c_lat, c_lon = 37.9747, 13.5753 
-
+# Creazione Mappa
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
+folium.TileLayer(tiles='https://mt1.google.com{x}&y={y}&z={z}', attr='Google', name='Google Satellite').add_to(m)
 
-folium.TileLayer(
-    tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-    attr='Google Satellite',
-    name='Google Satellite',
-    overlay=False, control=False
-).add_to(m)
-
-# --- NUOVA FUNZIONALITÀ EDITING RECINTO ---
+# 1. CREAZIONE GRUPPO EDITABILE PER IL RECINTO
+# Questo permette alla "matita" di vedere il vecchio recinto
+fg_edit = folium.FeatureGroup(name="Recinto Editabile")
 if saved_coords:
-    # Creiamo un GeoJson del recinto esistente per renderlo editabile
-    recinto_geojson = {
-        "type": "Feature",
-        "geometry": {
-            "type": "Polygon",
-            "coordinates": [[[p[1], p[0]] for p in saved_coords] + [[saved_coords[0][1], saved_coords[0][0]]]]
-        },
-        "properties": {"name": "Recinto Attuale"}
-    }
-    folium.GeoJson(recinto_geojson, name="Recinto", style_function=lambda x: {'color': 'yellow', 'fillOpacity': 0.2}).add_to(m)
+    folium.Polygon(
+        locations=saved_coords,
+        color="yellow",
+        weight=3,
+        fill=True,
+        fill_opacity=0.2,
+        name="Area Pascolo"
+    ).add_to(fg_edit)
+fg_edit.add_to(m)
 
-# Strumento Disegno Avanzato: abilita trascinamento e aggiunta vertici
+# 2. STRUMENTO DISEGNO COLLEGATO AL GRUPPO
 Draw(
     export=False,
     position='topleft',
     draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True},
-    edit_options={'edit': True, 'remove': True} # ABILITA EDITING E TRASCINAMENTO
+    edit_options={'featureGroup': fg_edit, 'edit': True, 'remove': True} # ABILITA EDITING
 ).add_to(m)
 
-# Marker Bovini (Invariati)
+# Marker Bovini
 for _, row in df_mandria.iterrows():
     if pd.notna(row['lat']) and row['lat'] != 0:
         color = 'green' if row['stato_recinto'] == 'DENTRO' else 'red'
         folium.Marker(
             [row['lat'], row['lon']],
-            popup=f"<b>{row['nome']}</b><br>Batteria: {row['batteria']}%<br>Stato: {row['stato_recinto']}",
+            popup=f"<b>{row['nome']}</b><br>Batt: {row['batteria']}%",
             icon=folium.Icon(color=color, icon='info-sign')
         ).add_to(m)
 
 # --- LAYOUT PRINCIPALE ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
-st.info("💡 Per modificare il recinto: clicca sull'icona 'Edit layers' (quadrato con matita), trascina i vertici gialli o aggiungine di nuovi dai punti medi, poi clicca 'Save' nello strumento di disegno e infine il pulsante blu sotto la mappa.")
+st.info("💡 **Per modificare:** Clicca la matita (Edit), trascina i vertici gialli o i punti medi per aggiungerne nuovi. Clicca 'Save' nel menu matita e poi il tasto blu sotto.")
 
 col_map, col_table = st.columns([3, 1])
 
 with col_map:
-    # Usiamo una key fissa per mantenere lo stato del disegno durante il refresh
-    out = st_folium(m, width="100%", height=650, key="main_map")
+    # Key fissa per evitare reset durante il refresh
+    out = st_folium(m, width="100%", height=650, key="cow_map")
     
-    # Cattura sia nuovi disegni che modifiche (all_drawings o last_active_drawing)
+    # Cattura coordinate (Nuovo disegno o Modifica esistente)
     new_poly = None
     if out and out.get('all_drawings'):
-        # Prende l'ultimo poligono (creato o modificato)
-        raw_coords = out['all_drawings'][-1]['geometry']['coordinates'][0]
+        # Prende l'ultimo poligono attivo (sia esso nuovo o editato)
+        last_drawing = out['all_drawings'][-1]
+        raw_coords = last_drawing['geometry']['coordinates'][0]
+        # Inversione Lon/Lat -> Lat/Lon per Supabase
         new_poly = [[p[1], p[0]] for p in raw_coords]
         
-        # Rimuove l'ultimo punto se duplicato (chiusura poligono geojson)
+        # Pulizia: rimuove l'ultimo punto se duplicato (chiusura automatica GeoJSON)
         if len(new_poly) > 1 and new_poly[0] == new_poly[-1]:
             new_poly.pop()
 
     if new_poly:
-        if st.button("💾 Conferma e Salva Nuovo Recinto"):
+        st.warning(f"Rilevata modifica al recinto ({len(new_poly)} vertici).")
+        if st.button("💾 CONFERMA E SALVA NUOVO RECINTO"):
             with conn.session as s:
-                s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), {"coords": json.dumps(new_poly)})
+                s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), 
+                          {"coords": json.dumps(new_poly)})
                 s.commit()
-            st.success("Recinto aggiornato con successo!")
+            st.success("Recinto salvato su Supabase!")
             st.rerun()
 
-# --- PANNELLO EMERGENZE E TABELLE (Invariati) ---
 with col_table:
-    st.subheader("⚠️ Pannello Emergenze")
-    df_emergenza = df_mandria[(df_mandria['stato_recinto'] == 'FUORI') | (df_mandria['batteria'] <= 20)].copy()
-
-    if not df_emergenza.empty:
-        def genera_avvisi(row):
-            avvisi = []
-            if row['stato_recinto'] == 'FUORI': avvisi.append("🚨 FUORI")
-            if row['batteria'] <= 20: avvisi.append("🪫 BATTERIA")
-            return " + ".join(avvisi)
-        df_emergenza['PROBLEMA'] = df_emergenza.apply(genera_avvisi, axis=1)
-        st.error(f"Trovate {len(df_emergenza)} criticità!")
-        st.dataframe(df_emergenza[['nome', 'PROBLEMA', 'batteria', 'ultimo_aggiornamento']], hide_index=True, use_container_width=True)
+    st.subheader("⚠️ Emergenze")
+    df_err = df_mandria[(df_mandria['stato_recinto'] == 'FUORI') | (df_mandria['batteria'] <= 20)]
+    if not df_err.empty:
+        st.error(f"Criticità: {len(df_err)}")
+        st.dataframe(df_err[['nome', 'stato_recinto', 'batteria']], hide_index=True)
     else:
-        st.success("✅ Tutto sotto controllo.")
-
+        st.success("Tutto OK")
+    
     st.divider()
-    with st.expander("🔍 Stato complessivo"):
-        st.dataframe(df_mandria.sort_values(by='nome')[['nome', 'stato_recinto', 'batteria']], hide_index=True, use_container_width=True)
+    with st.expander("🔍 Tutti i capi"):
+        st.dataframe(df_mandria[['nome', 'stato_recinto', 'batteria']], hide_index=True)
 
-st.write("---")
 st.subheader("📝 Storico Aggiornamenti")
 st.dataframe(df_mandria, use_container_width=True, hide_index=True)
