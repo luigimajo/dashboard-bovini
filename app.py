@@ -1,4 +1,4 @@
-import streamlit as st 
+import streamlit as st  
 import folium
 from streamlit_folium import st_folium
 from folium.plugins import Draw
@@ -10,16 +10,17 @@ from streamlit_autorefresh import st_autorefresh
 # --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# --- STATO EDIT RECINTO (pausa refresh durante disegno) ---
-if "editing_poly" not in st.session_state:
-    st.session_state["editing_poly"] = False
+# >>> MODIFICA: stato toggle per pausa refresh
+if "pause_refresh" not in st.session_state:
+    st.session_state["pause_refresh"] = False
 
-# >>> bozza poligono (persistenza tra rerun)
-if "draft_poly" not in st.session_state:
-    st.session_state["draft_poly"] = None
+# >>> MODIFICA: pulsante "matita" (toggle) per abilitare/disabilitare autorefresh
+if st.button("✏️", help="Pausa/Riprendi refresh automatico"):
+    st.session_state["pause_refresh"] = not st.session_state["pause_refresh"]
+    st.rerun()
 
-# Aggiornamento automatico della dashboard ogni 30 secondi (disabilitato in edit)
-if not st.session_state["editing_poly"]:
+# Aggiornamento automatico della dashboard ogni 30 secondi (solo se NON in pausa)
+if not st.session_state["pause_refresh"]:
     st_autorefresh(interval=30000, key="datarefresh")
 
 # Connessione a Supabase tramite SQLAlchemy
@@ -98,33 +99,26 @@ df_valid = df_valid[(df_valid['lat'] != 0) & (df_valid['lon'] != 0)]
 if not df_valid.empty:
     c_lat, c_lon = df_valid['lat'].mean(), df_valid['lon'].mean()
 else:
-    c_lat, c_lon = 37.9747, 13.5753 # Coordinate di default
+    c_lat, c_lon = 37.9747, 13.5753 # Coordinate di default (cambiale se necessario   37.97477189110554, 13.575302661571639)
 
 # Creazione Oggetto Folium
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
 # Layer Satellite Google
 folium.TileLayer(
+
+#   tiles='https://mt1.google.com{x}&y={y}&z={z}',
     tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+
     attr='Google Satellite',
     name='Google Satellite',
     overlay=False,
     control=False
 ).add_to(m)
 
-# Disegno Recinto salvato
+# Disegno Recinto
 if saved_coords:
     folium.Polygon(locations=saved_coords, color="yellow", weight=3, fill=True, fill_opacity=0.2).add_to(m)
-
-# >>> Disegno Recinto in BOZZA (persistente finché non salvi/annulli)
-if st.session_state["draft_poly"]:
-    folium.Polygon(
-        locations=st.session_state["draft_poly"],
-        color="black",
-        weight=3,
-        fill=True,
-        fill_opacity=0.15
-    ).add_to(m)
 
 # Marker Bovini
 for _, row in df_mandria.iterrows():
@@ -143,57 +137,34 @@ Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':Fa
 st.title("🛰️ MONITORAGGIO BOVINI H24")
 st.info("I dati vengono ricevuti e processati da Supabase anche quando questa pagina è chiusa.")
 
-# --- CONTROLLO MODALITÀ EDIT (pausa refresh) ---
-colA, colB, colC = st.columns([1, 1, 3])
-with colA:
-    if not st.session_state["editing_poly"]:
-        if st.button("✏️ Modifica recinto (pausa refresh)"):
-            st.session_state["editing_poly"] = True
-            st.session_state["draft_poly"] = None
-            st.rerun()
-with colB:
-    if st.session_state["editing_poly"]:
-        if st.button("❌ Annulla modifica"):
-            st.session_state["editing_poly"] = False
-            st.session_state["draft_poly"] = None
-            st.rerun()
-
-if st.session_state["editing_poly"]:
-    st.warning("Modalità modifica attiva: refresh automatico DISABILITATO finché non salvi o annulli.")
-
 col_map, col_table = st.columns([3, 1])
 
 with col_map:
     out = st_folium(m, width="100%", height=650, key="main_map")
-
-    # >>> Salviamo SEMPRE la bozza quando chiudi la poligonale (così non sparisce al rerun)
+    
+    # Salvataggio Recinto
     if out and out.get('all_drawings'):
         raw_coords = out['all_drawings'][-1]['geometry']['coordinates'][0]
-        new_poly = [[p[1], p[0]] for p in raw_coords]  # Lon/Lat -> Lat/Lon
-        st.session_state["draft_poly"] = new_poly
-
+        new_poly = [[p[1], p[0]] for p in raw_coords] # Inversione Lon/Lat -> Lat/Lon
         if st.button("💾 Conferma e Salva Nuovo Recinto"):
             with conn.session as s:
-                s.execute(
-                    text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) "
-                         "ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"),
-                    {"coords": json.dumps(new_poly)}
-                )
+                s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), {"coords": json.dumps(new_poly)})
                 s.commit()
             st.success("Recinto aggiornato!")
-            st.session_state["editing_poly"] = False
-            st.session_state["draft_poly"] = None
             st.rerun()
 
 with col_table:
     st.subheader("⚠️ Pannello Emergenze")
 
+    # 1. Identifichiamo tutti i bovini che hanno ALMENO un problema
+    # (Fuori recinto OPPURE batteria <= 20)
     df_emergenza = df_mandria[
         (df_mandria['stato_recinto'] == 'FUORI') | 
         (df_mandria['batteria'] <= 20)
     ].copy()
 
     if not df_emergenza.empty:
+        # Creiamo una colonna "Avvisi" dinamica
         def genera_avvisi(row):
             avvisi = []
             if row['stato_recinto'] == 'FUORI':
@@ -204,6 +175,7 @@ with col_table:
 
         df_emergenza['PROBLEMA'] = df_emergenza.apply(genera_avvisi, axis=1)
 
+        # Visualizzazione pulita
         st.error(f"Trovate {len(df_emergenza)} criticità!")
         st.dataframe(
             df_emergenza[['nome', 'PROBLEMA', 'batteria', 'ultimo_aggiornamento']], 
@@ -215,6 +187,7 @@ with col_table:
 
     st.divider()
 
+    # Elenco completo ridotto
     with st.expander("🔍 Stato complessivo (Tutti i 150 capi)"):
         st.dataframe(
             df_mandria.sort_values(by='nome')[['nome', 'stato_recinto', 'batteria']], 
