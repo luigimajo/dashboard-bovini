@@ -14,11 +14,17 @@ st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 if "pause_refresh" not in st.session_state:
     st.session_state["pause_refresh"] = False
 
+# >>> MODIFICA: bozza poligono (persistenza tra rerun mentre sei in edit)
+if "draft_poly" not in st.session_state:
+    st.session_state["draft_poly"] = None
+
 # >>> MODIFICA: pulsante "matita" + indicatore modalità
 col_edit_btn, col_edit_lbl = st.columns([1, 6])
 with col_edit_btn:
     if st.button("✏️", help="Pausa/Riprendi refresh automatico"):
         st.session_state["pause_refresh"] = not st.session_state["pause_refresh"]
+        if st.session_state["pause_refresh"]:
+            st.session_state["draft_poly"] = None
         st.rerun()
 
 with col_edit_lbl:
@@ -126,6 +132,16 @@ folium.TileLayer(
 if saved_coords:
     folium.Polygon(locations=saved_coords, color="yellow", weight=3, fill=True, fill_opacity=0.2).add_to(m)
 
+# >>> MODIFICA: Disegno Recinto (BOZZA) - resta visibile durante i rerun in modalità edit
+if st.session_state["pause_refresh"] and st.session_state["draft_poly"]:
+    folium.Polygon(
+        locations=st.session_state["draft_poly"],
+        color="black",
+        weight=3,
+        fill=True,
+        fill_opacity=0.15
+    ).add_to(m)
+
 # Marker Bovini
 for _, row in df_mandria.iterrows():
     if pd.notna(row['lat']) and row['lat'] != 0:
@@ -152,11 +168,18 @@ with col_map:
     if out and out.get('all_drawings'):
         raw_coords = out['all_drawings'][-1]['geometry']['coordinates'][0]
         new_poly = [[p[1], p[0]] for p in raw_coords] # Inversione Lon/Lat -> Lat/Lon
+
+        # >>> MODIFICA: salva bozza durante modalità edit (così non sparisce ai rerun)
+        if st.session_state["pause_refresh"]:
+            st.session_state["draft_poly"] = new_poly
+
         if st.button("💾 Conferma e Salva Nuovo Recinto"):
             with conn.session as s:
                 s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), {"coords": json.dumps(new_poly)})
                 s.commit()
             st.success("Recinto aggiornato!")
+            # >>> MODIFICA: pulizia bozza dopo salvataggio
+            st.session_state["draft_poly"] = None
             st.rerun()
 
 with col_table:
