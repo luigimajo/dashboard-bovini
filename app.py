@@ -56,18 +56,17 @@ with st.sidebar.expander("➕ Aggiungi/Rimuovi"):
             s.commit()
         st.rerun()
 
-# --- LOGICA MAPPA ---
-df_valid = df_mandria.dropna(subset=['lat', 'lon'])
-df_valid = df_valid[(df_valid['lat'] != 0) & (df_valid['lon'] != 0)]
-c_lat, c_lon = (df_valid['lat'].mean(), df_valid['lon'].mean()) if not df_valid.empty else (37.9747, 13.5753)
-
-# Creazione Mappa
+# --- LOGICA MAPPA CORRETTA ---
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
-folium.TileLayer(tiles='https://mt1.google.com{x}&y={y}&z={z}', attr='Google', name='Google Satellite').add_to(m)
 
-# 1. CREAZIONE GRUPPO EDITABILE PER IL RECINTO
-# Questo permette alla "matita" di vedere il vecchio recinto
-fg_edit = folium.FeatureGroup(name="Recinto Editabile")
+folium.TileLayer(
+    tiles='https://mt1.google.com{x}&y={y}&z={z}',
+    attr='Google Satellite',
+    name='Google Satellite',
+    overlay=False, control=False
+).add_to(m)
+
+# 1. DISEGNO DEL RECINTO SALVATO (Semplice Poligono)
 if saved_coords:
     folium.Polygon(
         locations=saved_coords,
@@ -75,9 +74,54 @@ if saved_coords:
         weight=3,
         fill=True,
         fill_opacity=0.2,
-        name="Area Pascolo"
-    ).add_to(fg_edit)
-fg_edit.add_to(m)
+        tooltip="Recinto Attuale"
+    ).add_to(m)
+
+# 2. STRUMENTO DISEGNO (Versione Standard più stabile)
+# Nota: Per modificare il recinto, ricalcalo sopra quello vecchio 
+# o usa questa versione che non manda in crash il JSON encoder
+Draw(
+    export=False,
+    position='topleft',
+    draw_options={
+        'polyline': False, 
+        'rectangle': False, 
+        'circle': False, 
+        'marker': False, 
+        'circlemarker': False, 
+        'polygon': True
+    },
+    edit_options={'edit': True, 'remove': True} 
+).add_to(m)
+
+# Marker Bovini (Invariati)
+for _, row in df_mandria.iterrows():
+    if pd.notna(row['lat']) and row['lat'] != 0:
+        color = 'green' if row['stato_recinto'] == 'DENTRO' else 'red'
+        folium.Marker(
+            [row['lat'], row['lon']],
+            popup=f"<b>{row['nome']}</b>",
+            icon=folium.Icon(color=color, icon='info-sign')
+        ).add_to(m)
+
+# --- LAYOUT ---
+with col_map:
+    # L'uso di st_folium con i parametri corretti risolve il crash
+    out = st_folium(m, width=700, height=650, key="cow_map")
+    
+    if out and out.get('all_drawings'):
+        # Logica di cattura identica a prima
+        raw_coords = out['all_drawings'][-1]['geometry']['coordinates'][0]
+        new_poly = [[p[1], p[0]] for p in raw_coords]
+        
+        if st.button("💾 SALVA NUOVO RECINTO"):
+            with conn.session as s:
+                s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), 
+                          {"coords": json.dumps(new_poly)})
+                s.commit()
+            st.success("Recinto salvato!")
+            st.rerun()
+
 
 # 2. STRUMENTO DISEGNO COLLEGATO AL GRUPPO
 Draw(
