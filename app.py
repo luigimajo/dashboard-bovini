@@ -13,10 +13,18 @@ st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 # Aggiornamento automatico della dashboard ogni 30 secondi
 # --- LOGICA DI REFRESH DINAMICO ---
 # Se l'utente sta disegnando, non vogliamo il refresh
-if "main_map" in st.session_state and st.session_state["main_map"].get("all_drawings"):
-    st.sidebar.warning("⚠️ Refresh in pausa (disegno in corso)")
-else:
+# --- CONFIGURAZIONE PAGINA ---
+st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
+
+# Inizializziamo lo stato del blocco refresh se non esiste
+if "lock_refresh" not in st.session_state:
+    st.session_state.lock_refresh = False
+
+# Esegui il refresh SOLO se non abbiamo attivato il blocco manuale
+if not st.session_state.lock_refresh:
     st_autorefresh(interval=30000, key="datarefresh")
+else:
+    st.sidebar.warning("🔄 Refresh DISABILITATO per modifica recinto")
 
 # Connessione a Supabase tramite SQLAlchemy
 conn = st.connection("postgresql", type="sql")
@@ -135,22 +143,34 @@ st.info("I dati vengono ricevuti e processati da Supabase anche quando questa pa
 col_map, col_table = st.columns([3, 1])
 
 with col_map:
-    # Aggiungiamo la key esplicita per monitorare lo stato del disegno
+    # Tasto per bloccare il timer ed evitare cancellazioni improvvise
+    if not st.session_state.lock_refresh:
+        if st.button("🏗️ CLICCA QUI PER INIZIARE A DISEGNARE (Blocca Refresh)"):
+            st.session_state.lock_refresh = True
+            st.rerun()
+    else:
+        if st.button("🔓 Sblocca Refresh e Annulla"):
+            st.session_state.lock_refresh = False
+            st.rerun()
+
     out = st_folium(m, width="100%", height=650, key="main_map")
     
     # Salvataggio Recinto
     if out and out.get('all_drawings'):
-        # Prendiamo l'ultimo poligono disegnato
-        raw_coords = out['all_drawings'][-1]['geometry']['coordinates'][0]
-        new_poly = [[p[1], p[0]] for p in raw_coords] 
-        
-        if st.button("💾 Conferma e Salva Nuovo Recinto"):
-            with conn.session as s:
-                s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), {"coords": json.dumps(new_poly)})
-                s.commit()
-            st.success("Recinto aggiornato!")
-            # Il rerun pulisce lo stato e riattiva il refresh
-            st.rerun()
+        # Verifichiamo che ci sia una geometria valida (evita errori se il disegno è vuoto)
+        if len(out['all_drawings']) > 0:
+            raw_coords = out['all_drawings'][-1]['geometry']['coordinates'][0]
+            new_poly = [[p[1], p[0]] for p in raw_coords] 
+            
+            if st.button("💾 Conferma e Salva Nuovo Recinto"):
+                with conn.session as s:
+                    s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), {"coords": json.dumps(new_poly)})
+                    s.commit()
+                st.success("Recinto aggiornato!")
+                # Sblocchiamo il refresh automaticamente dopo il salvataggio
+                st.session_state.lock_refresh = False
+                st.rerun()
+
 
 with col_table:
     st.subheader("⚠️ Pannello Emergenze")
