@@ -8,12 +8,26 @@ from sqlalchemy import text
 from streamlit_autorefresh import st_autorefresh
 
 # --- CONFIGURAZIONE PAGINA ---
+
+
+import streamlit as st
+# ... (altri import)
+
+# --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# --- UNICA MODIFICA PER STABILIZZARE IL REFRESH ---
-# Usiamo una 'key' fissa. Senza questa, Streamlit crea nuovi timer ogni volta 
-# che tocchi la mappa, causando refresh ogni pochi secondi.
-st_autorefresh(interval=30000, key="timer_unico_stabile")
+# Funzione per gestire il refresh in modo isolato dal resto della pagina
+# Questo impedisce che il caricamento della mappa o della sidebar blocchi il timer
+@st.fragment(run_every=30)
+def auto_refresh_fragment():
+    # Questo comando forza il ricaricamento dell'intera app ogni 30 secondi esatti
+    # È molto più stabile di st_autorefresh perché gestito internamente da Streamlit
+    st.rerun()
+
+# Avviamo il timer isolato
+auto_refresh_fragment()
+
+# --- CONNESSIONE E CARICAMENTO DATI ---
 
 # Connessione a Supabase tramite SQLAlchemy
 conn = st.connection("postgresql", type="sql")
