@@ -10,8 +10,8 @@ from streamlit_autorefresh import st_autorefresh
 # --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# Aggiornamento automatico della dashboard ogni 30 secondi
-st_autorefresh(interval=30000, key="datarefresh")
+# Aggiornamento automatico stabilizzato con KEY univoca
+st_autorefresh(interval=30000, key="datarefresh_stabile")
 
 # Connessione a Supabase tramite SQLAlchemy
 conn = st.connection("postgresql", type="sql")
@@ -25,7 +25,12 @@ def load_data():
         df_g = conn.query("SELECT * FROM gateway ORDER BY ultima_attivita DESC", ttl=0)
         # Carichiamo il Recinto
         df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
-        coords = json.loads(df_r.iloc[0]['coords']) if not df_r.empty else []
+        
+        # Correzione accesso ai dati per evitare errori di indice
+        if not df_r.empty:
+            coords = json.loads(df_r.iloc[0]['coords'])
+        else:
+            coords = []
         return df_m, df_g, coords
     except Exception as e:
         st.error(f"Errore database: {e}")
@@ -82,35 +87,27 @@ if not df_mandria.empty:
             st.rerun()
 
 # --- LOGICA MAPPA ---
-# Escludiamo punti 0,0 o NULL per centrare la mappa
 df_valid = df_mandria.dropna(subset=['lat', 'lon'])
 df_valid = df_valid[(df_valid['lat'] != 0) & (df_valid['lon'] != 0)]
 
 if not df_valid.empty:
     c_lat, c_lon = df_valid['lat'].mean(), df_valid['lon'].mean()
 else:
-    c_lat, c_lon = 37.9747, 13.5753 # Coordinate di default (cambiale se necessario   37.97477189110554, 13.575302661571639)
+    c_lat, c_lon = 37.9747, 13.5753 
 
-# Creazione Oggetto Folium
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
-# Layer Satellite Google
 folium.TileLayer(
-
-#   tiles='https://mt1.google.com{x}&y={y}&z={z}',
     tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-
     attr='Google Satellite',
     name='Google Satellite',
     overlay=False,
     control=False
 ).add_to(m)
 
-# Disegno Recinto
 if saved_coords:
     folium.Polygon(locations=saved_coords, color="yellow", weight=3, fill=True, fill_opacity=0.2).add_to(m)
 
-# Marker Bovini
 for _, row in df_mandria.iterrows():
     if pd.notna(row['lat']) and row['lat'] != 0:
         color = 'green' if row['stato_recinto'] == 'DENTRO' else 'red'
@@ -120,22 +117,20 @@ for _, row in df_mandria.iterrows():
             icon=folium.Icon(color=color, icon='info-sign')
         ).add_to(m)
 
-# Strumento Disegno
 Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
 
 # --- LAYOUT PRINCIPALE ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
-st.info("I dati vengono ricevuti e processati da Supabase anche quando questa pagina è chiusa.")
+st.info("I dati vengono ricevuti e processati da Supabase.")
 
 col_map, col_table = st.columns([3, 1])
 
 with col_map:
     out = st_folium(m, width="100%", height=650, key="main_map")
     
-    # Salvataggio Recinto
     if out and out.get('all_drawings'):
         raw_coords = out['all_drawings'][-1]['geometry']['coordinates'][0]
-        new_poly = [[p[1], p[0]] for p in raw_coords] # Inversione Lon/Lat -> Lat/Lon
+        new_poly = [[p[1], p[0]] for p in raw_coords]
         if st.button("💾 Conferma e Salva Nuovo Recinto"):
             with conn.session as s:
                 s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), {"coords": json.dumps(new_poly)})
@@ -145,45 +140,23 @@ with col_map:
 
 with col_table:
     st.subheader("⚠️ Pannello Emergenze")
-
-    # 1. Identifichiamo tutti i bovini che hanno ALMENO un problema
-    # (Fuori recinto OPPURE batteria <= 20)
-    df_emergenza = df_mandria[
-        (df_mandria['stato_recinto'] == 'FUORI') | 
-        (df_mandria['batteria'] <= 20)
-    ].copy()
+    df_emergenza = df_mandria[(df_mandria['stato_recinto'] == 'FUORI') | (df_mandria['batteria'] <= 20)].copy()
 
     if not df_emergenza.empty:
-        # Creiamo una colonna "Avvisi" dinamica
         def genera_avvisi(row):
             avvisi = []
-            if row['stato_recinto'] == 'FUORI':
-                avvisi.append("🚨 FUORI")
-            if row['batteria'] <= 20:
-                avvisi.append("🪫 BATTERIA")
+            if row['stato_recinto'] == 'FUORI': avvisi.append("🚨 FUORI")
+            if row['batteria'] <= 20: avvisi.append("🪫 BATTERIA")
             return " + ".join(avvisi)
-
         df_emergenza['PROBLEMA'] = df_emergenza.apply(genera_avvisi, axis=1)
-
-        # Visualizzazione pulita
-        st.error(f"Trovate {len(df_emergenza)} criticità!")
-        st.dataframe(
-            df_emergenza[['nome', 'PROBLEMA', 'batteria', 'ultimo_aggiornamento']], 
-            hide_index=True, 
-            use_container_width=True
-        )
+        st.error(f"Criticità: {len(df_emergenza)}")
+        st.dataframe(df_emergenza[['nome', 'PROBLEMA', 'batteria']], hide_index=True)
     else:
-        st.success("✅ Tutto sotto controllo: mandria nel recinto e batterie cariche.")
+        st.success("✅ Tutto OK")
 
     st.divider()
-
-    # Elenco completo ridotto
-    with st.expander("🔍 Stato complessivo (Tutti i 150 capi)"):
-        st.dataframe(
-            df_mandria.sort_values(by='nome')[['nome', 'stato_recinto', 'batteria']], 
-            hide_index=True,
-            use_container_width=True
-        )
+    with st.expander("🔍 Stato complessivo"):
+        st.dataframe(df_mandria[['nome', 'stato_recinto', 'batteria']], hide_index=True)
 
 st.write("---")
 st.subheader("📝 Storico Aggiornamenti")
