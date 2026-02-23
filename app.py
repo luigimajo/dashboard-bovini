@@ -10,33 +10,34 @@ from streamlit_autorefresh import st_autorefresh
 # --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# Aggiornamento automatico stabilizzato con KEY univoca
-st_autorefresh(interval=30000, key="datarefresh_stabile")
+# --- FIX REFRESH INFALLIBILE ---
+# Creiamo un contenitore vuoto all'inizio assoluto. 
+# Questo garantisce che il timer parta PRIMA di caricare i dati pesanti dal DB.
+refresh_container = st.empty()
+with refresh_container:
+    st_autorefresh(interval=30000, key="timer_granitico_30s")
 
-# Connessione a Supabase tramite SQLAlchemy
+# --- CONNESSIONE E CARICAMENTO DATI ---
 conn = st.connection("postgresql", type="sql")
 
-# --- FUNZIONI CARICAMENTO DATI ---
 def load_data():
     try:
-        # Carichiamo i Bovini
         df_m = conn.query("SELECT * FROM mandria ORDER BY nome ASC", ttl=0)
-        # Carichiamo i Gateway
         df_g = conn.query("SELECT * FROM gateway ORDER BY ultima_attivita DESC", ttl=0)
-        # Carichiamo il Recinto
         df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
-        
-        # Correzione accesso ai dati per evitare errori di indice
-        if not df_r.empty:
+        # Fix per caricamento sicuro coordinate
+        coords = []
+        if not df_r.empty and df_r.iloc[0]['coords']:
             coords = json.loads(df_r.iloc[0]['coords'])
-        else:
-            coords = []
         return df_m, df_g, coords
     except Exception as e:
-        st.error(f"Errore database: {e}")
+        st.error(f"Errore DB: {e}")
         return pd.DataFrame(), pd.DataFrame(), []
 
 df_mandria, df_gateways, saved_coords = load_data()
+
+# --- IL RESTO DEL TUO CODICE (Sidebar, Mappa, Tabelle) RIMANE IDENTICO ---
+
 
 # --- SIDEBAR: STATO INFRASTRUTTURA (GATEWAY) ---
 st.sidebar.header("📡 STATO RETE LORA")
