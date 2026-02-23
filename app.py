@@ -1,4 +1,4 @@
-import streamlit as st  
+import streamlit as st
 import folium
 from streamlit_folium import st_folium
 from folium.plugins import Draw
@@ -10,23 +10,12 @@ from streamlit_autorefresh import st_autorefresh
 # --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# >>> MODIFICA: stato toggle per pausa refresh
-if "pause_refresh" not in st.session_state:
-    st.session_state["pause_refresh"] = False
-
-# >>> MODIFICA: pulsante "matita" + indicatore modalità
-col_edit_btn, col_edit_lbl = st.columns([1, 6])
-with col_edit_btn:
-    if st.button("✏️", help="Pausa/Riprendi refresh automatico"):
-        st.session_state["pause_refresh"] = not st.session_state["pause_refresh"]
-        st.rerun()
-
-with col_edit_lbl:
-    if st.session_state["pause_refresh"]:
-        st.markdown("**🟨 Modalità edit recinto**")
-
-# Aggiornamento automatico della dashboard ogni 30 secondi (solo se NON in pausa)
-if not st.session_state["pause_refresh"]:
+# Aggiornamento automatico della dashboard ogni 30 secondi
+# --- LOGICA DI REFRESH DINAMICO ---
+# Se l'utente sta disegnando, non vogliamo il refresh
+if "main_map" in st.session_state and st.session_state["main_map"].get("all_drawings"):
+    st.sidebar.warning("⚠️ Refresh in pausa (disegno in corso)")
+else:
     st_autorefresh(interval=30000, key="datarefresh")
 
 # Connessione a Supabase tramite SQLAlchemy
@@ -146,17 +135,21 @@ st.info("I dati vengono ricevuti e processati da Supabase anche quando questa pa
 col_map, col_table = st.columns([3, 1])
 
 with col_map:
+    # Aggiungiamo la key esplicita per monitorare lo stato del disegno
     out = st_folium(m, width="100%", height=650, key="main_map")
     
     # Salvataggio Recinto
     if out and out.get('all_drawings'):
+        # Prendiamo l'ultimo poligono disegnato
         raw_coords = out['all_drawings'][-1]['geometry']['coordinates'][0]
-        new_poly = [[p[1], p[0]] for p in raw_coords] # Inversione Lon/Lat -> Lat/Lon
+        new_poly = [[p[1], p[0]] for p in raw_coords] 
+        
         if st.button("💾 Conferma e Salva Nuovo Recinto"):
             with conn.session as s:
                 s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), {"coords": json.dumps(new_poly)})
                 s.commit()
             st.success("Recinto aggiornato!")
+            # Il rerun pulisce lo stato e riattiva il refresh
             st.rerun()
 
 with col_table:
