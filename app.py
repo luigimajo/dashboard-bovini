@@ -52,16 +52,17 @@ df_valid = df_mandria.dropna(subset=['lat', 'lon'])
 df_valid = df_valid[(df_valid['lat'] != 0) & (df_valid['lon'] != 0)]
 c_lat, c_lon = (df_valid['lat'].mean(), df_valid['lon'].mean()) if not df_valid.empty else (37.9747, 13.5753)
 
+
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
-# Layer Satellite Google Originale
 folium.TileLayer(
-    tiles='https://mt1.google.com{x}&y={y}&z={z}',
+    tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
     attr='Google Satellite',
     name='Google Satellite',
     overlay=False,
     control=False
 ).add_to(m)
+
 
 if saved_coords:
     folium.Polygon(locations=saved_coords, color="yellow", weight=3, fill=True, fill_opacity=0.2).add_to(m)
