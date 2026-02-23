@@ -7,25 +7,17 @@ import pandas as pd
 from sqlalchemy import text
 from streamlit_autorefresh import st_autorefresh
 
-# --- CONFIGURAZIONE PAGINA ---
-
-
-import streamlit as st
-# ... (altri import)
 
 # --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# Funzione per gestire il refresh in modo isolato dal resto della pagina
-# Questo impedisce che il caricamento della mappa o della sidebar blocchi il timer
-@st.fragment(run_every=30)
-def auto_refresh_fragment():
-    # Questo comando forza il ricaricamento dell'intera app ogni 30 secondi esatti
-    # È molto più stabile di st_autorefresh perché gestito internamente da Streamlit
-    st.rerun()
+# CREIAMO UN POSTO FISSO PER IL TIMER (Evita che sparisca durante il caricamento)
+placeholder_timer = st.empty()
 
-# Avviamo il timer isolato
-auto_refresh_fragment()
+with placeholder_timer:
+    # Usiamo una key numerica basata sul tempo per forzare il sync iniziale
+    st_autorefresh(interval=30000, key="timer_stabile_30s")
+    
 
 # --- CONNESSIONE E CARICAMENTO DATI ---
 
