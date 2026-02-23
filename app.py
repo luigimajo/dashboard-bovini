@@ -7,19 +7,11 @@ import pandas as pd
 from sqlalchemy import text
 from streamlit_autorefresh import st_autorefresh
 
-
 # --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# CREIAMO UN POSTO FISSO PER IL TIMER (Evita che sparisca durante il caricamento)
-placeholder_timer = st.empty()
-
-with placeholder_timer:
-    # Usiamo una key numerica basata sul tempo per forzare il sync iniziale
-    st_autorefresh(interval=30000, key="datarefresh")
-    
-
-# --- CONNESSIONE E CARICAMENTO DATI ---
+# Aggiornamento automatico della dashboard ogni 30 secondi
+st_autorefresh(interval=30000, key="datarefresh")
 
 # Connessione a Supabase tramite SQLAlchemy
 conn = st.connection("postgresql", type="sql")
@@ -33,23 +25,13 @@ def load_data():
         df_g = conn.query("SELECT * FROM gateway ORDER BY ultima_attivita DESC", ttl=0)
         # Carichiamo il Recinto
         df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
-        
-        # Gestione sicura dei dati estratti
-        if not df_r.empty and df_r.iloc[0]['coords']:
-            coords = json.loads(df_r.iloc[0]['coords'])
-        else:
-            coords = []
-            
+        coords = json.loads(df_r.iloc[0]['coords']) if not df_r.empty else []
         return df_m, df_g, coords
     except Exception as e:
         st.error(f"Errore database: {e}")
         return pd.DataFrame(), pd.DataFrame(), []
 
 df_mandria, df_gateways, saved_coords = load_data()
-
-# --- IL RESTO DEL TUO CODICE RIMANE INVARIATO ---
-# (Inserisci qui tutta la parte della sidebar, mappa e tabelle così com'erano)
-
 
 # --- SIDEBAR: STATO INFRASTRUTTURA (GATEWAY) ---
 st.sidebar.header("📡 STATO RETE LORA")
@@ -206,18 +188,3 @@ with col_table:
 st.write("---")
 st.subheader("📝 Storico Aggiornamenti")
 st.dataframe(df_mandria, use_container_width=True, hide_index=True)
-
-
-# Aggiornamento automatico della dashboard ogni 30 secondi
-# --- CONFIGURAZIONE PAGINA ---
-st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
-
-# Inizializziamo lo stato del blocco refresh se non esiste
-if "lock_refresh" not in st.session_state:
-    st.session_state.lock_refresh = False
-
-# Esegui il refresh SOLO se non abbiamo attivato il blocco manuale
-if not st.session_state.lock_refresh:
-    st_autorefresh(interval=30000, key="datarefresh")
-else:
-    st.sidebar.warning("🔄 Refresh DISABILITATO per modifica recinto")
