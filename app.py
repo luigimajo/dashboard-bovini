@@ -6,48 +6,94 @@ import json
 import pandas as pd
 from sqlalchemy import text
 from streamlit_autorefresh import st_autorefresh
-import time
 
-# --- 1. CONFIGURAZIONE PAGINA (Deve essere la prima istruzione) ---
+# --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# Inizializzazione stato del blocco
-if "lock_refresh" not in st.session_state:
-    st.session_state.lock_refresh = False
+# Aggiornamento automatico stabilizzato con KEY univoca
+st_autorefresh(interval=30000, key="datarefresh_stabile")
 
-# --- 2. LOGICA REFRESH STABILE ---
-# Se non è bloccato, esegue il refresh ogni 30s con chiave temporale per evitare "timer fantasma"
-if not st.session_state.lock_refresh:
-    st_autorefresh(interval=30000, key=f"timer_{int(time.time() // 30)}")
-else:
-    st.sidebar.warning("⚠️ REFRESH SOSPESO")
-    if st.sidebar.button("🔓 RIPRISTINA REFRESH"):
-        st.session_state.lock_refresh = False
-        st.rerun()
-
-# Connessione Database
+# Connessione a Supabase tramite SQLAlchemy
 conn = st.connection("postgresql", type="sql")
 
-# --- 3. CARICAMENTO DATI ---
+# --- FUNZIONI CARICAMENTO DATI ---
 def load_data():
     try:
+        # Carichiamo i Bovini
         df_m = conn.query("SELECT * FROM mandria ORDER BY nome ASC", ttl=0)
+        # Carichiamo i Gateway
         df_g = conn.query("SELECT * FROM gateway ORDER BY ultima_attivita DESC", ttl=0)
+        # Carichiamo il Recinto
         df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
-        coords = []
+        
+        # Correzione accesso ai dati per evitare errori di indice
         if not df_r.empty:
-            val = df_r.iloc[0]['coords']
-            coords = json.loads(val) if isinstance(val, str) else val
+            coords = json.loads(df_r.iloc[0]['coords'])
+        else:
+            coords = []
         return df_m, df_g, coords
     except Exception as e:
+        st.error(f"Errore database: {e}")
         return pd.DataFrame(), pd.DataFrame(), []
 
 df_mandria, df_gateways, saved_coords = load_data()
 
-# --- 4. COSTRUZIONE MAPPA ---
+# --- SIDEBAR: STATO INFRASTRUTTURA (GATEWAY) ---
+st.sidebar.header("📡 STATO RETE LORA")
+if not df_gateways.empty:
+    for _, g in df_gateways.iterrows():
+        status_color = "#28a745" if g['stato'] == 'ONLINE' else "#dc3545"
+        icon = "✅" if g['stato'] == 'ONLINE' else "❌"
+        st.sidebar.markdown(f"""
+            <div style="border-left: 5px solid {status_color}; padding: 10px; background-color: rgba(255,255,255,0.05); border-radius: 5px; margin-bottom: 10px;">
+                <b style="font-size: 14px;">{icon} {g['nome']}</b><br>
+                <small>Stato: {g['stato']}</small><br>
+                <small>Ultimo segnale: {g['ultima_attivita'].strftime('%H:%M:%S')}</small>
+            </div>
+        """, unsafe_allow_html=True)
+else:
+    st.sidebar.info("Nessun Gateway configurato.")
+
+with st.sidebar.expander("➕ Configura Nuovo Gateway"):
+    g_id = st.text_input("ID Gateway (da TTN)")
+    g_nome = st.text_input("Nome Località (es. Stalla Alta)")
+    if st.button("Registra Gateway"):
+        if g_id and g_nome:
+            with conn.session as s:
+                s.execute(text("INSERT INTO gateway (id, nome, stato) VALUES (:id, :nome, 'ONLINE')"), {"id": g_id, "nome": g_nome})
+                s.commit()
+            st.rerun()
+
+# --- SIDEBAR: GESTIONE MANDRIA ---
+st.sidebar.markdown("---")
+st.sidebar.header("📋 GESTIONE BOVINI")
+with st.sidebar.expander("➕ Aggiungi Bovino"):
+    n_id = st.text_input("ID Tracker (es. tracker-luigi)")
+    n_nome = st.text_input("Nome Animale")
+    if st.button("Salva Bovino"):
+        if n_id and n_nome:
+            with conn.session as s:
+                s.execute(text("INSERT INTO mandria (id, nome, lat, lon, stato_recinto) VALUES (:id, :nome, NULL, NULL, 'DENTRO') ON CONFLICT (id) DO UPDATE SET nome = EXCLUDED.nome"), {"id": n_id, "nome": n_nome})
+                s.commit()
+            st.rerun()
+
+if not df_mandria.empty:
+    with st.sidebar.expander("🗑️ Rimuovi Bovino"):
+        bov_del = st.selectbox("Seleziona da eliminare:", df_mandria['nome'].tolist())
+        if st.button("Elimina"):
+            with conn.session as s:
+                s.execute(text("DELETE FROM mandria WHERE nome=:nome"), {"nome": bov_del})
+                s.commit()
+            st.rerun()
+
+# --- LOGICA MAPPA ---
 df_valid = df_mandria.dropna(subset=['lat', 'lon'])
 df_valid = df_valid[(df_valid['lat'] != 0) & (df_valid['lon'] != 0)]
-c_lat, c_lon = (df_valid['lat'].mean(), df_valid['lon'].mean()) if not df_valid.empty else (37.9747, 13.5753)
+
+if not df_valid.empty:
+    c_lat, c_lon = df_valid['lat'].mean(), df_valid['lon'].mean()
+else:
+    c_lat, c_lon = 37.9747, 13.5753 
 
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
@@ -59,63 +105,59 @@ folium.TileLayer(
     control=False
 ).add_to(m)
 
-
 if saved_coords:
     folium.Polygon(locations=saved_coords, color="yellow", weight=3, fill=True, fill_opacity=0.2).add_to(m)
 
 for _, row in df_mandria.iterrows():
     if pd.notna(row['lat']) and row['lat'] != 0:
         color = 'green' if row['stato_recinto'] == 'DENTRO' else 'red'
-        folium.Marker([row['lat'], row['lon']], icon=folium.Icon(color=color, icon='info-sign')).add_to(m)
+        folium.Marker(
+            [row['lat'], row['lon']],
+            popup=f"<b>{row['nome']}</b><br>Batteria: {row['batteria']}%<br>Stato: {row['stato_recinto']}",
+            icon=folium.Icon(color=color, icon='info-sign')
+        ).add_to(m)
 
 Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
 
-# --- 5. SIDEBAR (Statica per evitare sovrapposizioni) ---
-with st.sidebar:
-    st.header("📡 RETE LORA")
-    # Qui inserisci la tua logica visualizzazione gateway...
-    st.divider()
-    with st.expander("➕ Gestione"):
-        st.session_state.lock_refresh = True
-        # Qui inserisci i tuoi input...
-
-# --- 6. LAYOUT PRINCIPALE ---
+# --- LAYOUT PRINCIPALE ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
+st.info("I dati vengono ricevuti e processati da Supabase.")
 
-# Definiamo le colonne con proporzioni fisse per impedire alla mappa di espandersi sulla sidebar
 col_map, col_table = st.columns([3, 1])
 
 with col_map:
-    # Pulsante di controllo disegno
-    if not st.session_state.lock_refresh:
-        if st.button("🏗️ INIZIA DISEGNO (Blocca Refresh)"):
-            st.session_state.lock_refresh = True
-            st.rerun()
-    else:
-        if st.button("🔓 ANNULLA E SBLOCCA"):
-            st.session_state.lock_refresh = False
-            st.rerun()
-
-    # Visualizzazione Mappa con KEY statica per stabilità layout
-    out = st_folium(m, width=1000, height=650, key="main_map_stable")
+    out = st_folium(m, width="100%", height=650, key="main_map")
     
-    if out and out.get('all_drawings') and len(out['all_drawings']) > 0:
+    if out and out.get('all_drawings'):
         raw_coords = out['all_drawings'][-1]['geometry']['coordinates'][0]
-        new_poly = [[p[1], p[0]] for p in raw_coords] # Conversione Lon/Lat -> Lat/Lon
-        
-        if st.button("💾 SALVA NUOVO RECINTO"):
+        new_poly = [[p[1], p[0]] for p in raw_coords]
+        if st.button("💾 Conferma e Salva Nuovo Recinto"):
             with conn.session as s:
                 s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), {"coords": json.dumps(new_poly)})
                 s.commit()
-            st.session_state.lock_refresh = False
-            st.success("Salvato! Riavvio refresh...")
-            time.sleep(1)
+            st.success("Recinto aggiornato!")
             st.rerun()
 
 with col_table:
-    st.subheader("⚠️ Emergenze")
-    st.dataframe(df_mandria[df_mandria['stato_recinto'] == 'FUORI'], hide_index=True)
+    st.subheader("⚠️ Pannello Emergenze")
+    df_emergenza = df_mandria[(df_mandria['stato_recinto'] == 'FUORI') | (df_mandria['batteria'] <= 20)].copy()
 
-st.divider()
-st.subheader("📝 Storico Completo")
+    if not df_emergenza.empty:
+        def genera_avvisi(row):
+            avvisi = []
+            if row['stato_recinto'] == 'FUORI': avvisi.append("🚨 FUORI")
+            if row['batteria'] <= 20: avvisi.append("🪫 BATTERIA")
+            return " + ".join(avvisi)
+        df_emergenza['PROBLEMA'] = df_emergenza.apply(genera_avvisi, axis=1)
+        st.error(f"Criticità: {len(df_emergenza)}")
+        st.dataframe(df_emergenza[['nome', 'PROBLEMA', 'batteria']], hide_index=True)
+    else:
+        st.success("✅ Tutto OK")
+
+    st.divider()
+    with st.expander("🔍 Stato complessivo"):
+        st.dataframe(df_mandria[['nome', 'stato_recinto', 'batteria']], hide_index=True)
+
+st.write("---")
+st.subheader("📝 Storico Aggiornamenti")
 st.dataframe(df_mandria, use_container_width=True, hide_index=True)
