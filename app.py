@@ -1,3 +1,4 @@
+
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
@@ -6,34 +7,39 @@ import json
 import pandas as pd
 from sqlalchemy import text
 from streamlit_autorefresh import st_autorefresh
+import time
 
 # --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# Aggiornamento automatico stabilizzato con KEY univoca
-st_autorefresh(interval=30000, key="datarefresh_stabile")
+# --- LOGICA DI BLOCCO E RESET REFRESH ---
+if "lock_refresh" not in st.session_state:
+    st.session_state.lock_refresh = False
 
-# Connessione a Supabase tramite SQLAlchemy
+# CREIAMO UN TIMER UNIVOCO PER QUESTA SESSIONE (Evita i refresh a 13s o random)
+if not st.session_state.lock_refresh:
+    # Usiamo un placeholder per assicurarci che il timer sia la prima cosa inviata al browser
+    refresh_area = st.empty()
+    with refresh_area:
+        # La key include il timestamp dell'ultimo refresh per resettare i timer fantasma
+        st_autorefresh(interval=30000, key=f"timer_{int(time.time() // 30)}")
+else:
+    st.sidebar.warning("⚠️ REFRESH SOSPESO (Modifica in corso)")
+    if st.sidebar.button("Sblocca Refresh"):
+        st.session_state.lock_refresh = False
+        st.rerun()
+
+# --- CONNESSIONE E DATI ---
 conn = st.connection("postgresql", type="sql")
 
-# --- FUNZIONI CARICAMENTO DATI ---
 def load_data():
     try:
-        # Carichiamo i Bovini
         df_m = conn.query("SELECT * FROM mandria ORDER BY nome ASC", ttl=0)
-        # Carichiamo i Gateway
         df_g = conn.query("SELECT * FROM gateway ORDER BY ultima_attivita DESC", ttl=0)
-        # Carichiamo il Recinto
         df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
-        
-        # Correzione accesso ai dati per evitare errori di indice
-        if not df_r.empty:
-            coords = json.loads(df_r.iloc[0]['coords'])
-        else:
-            coords = []
+        coords = json.loads(df_r.iloc[0]['coords']) if not df_r.empty else []
         return df_m, df_g, coords
     except Exception as e:
-        st.error(f"Errore database: {e}")
         return pd.DataFrame(), pd.DataFrame(), []
 
 df_mandria, df_gateways, saved_coords = load_data()
@@ -126,15 +132,23 @@ st.info("I dati vengono ricevuti e processati da Supabase.")
 col_map, col_table = st.columns([3, 1])
 
 with col_map:
+    # PULSANTE ESSENZIALE PER DISEGNARE SENZA REFRESH
+    if not st.session_state.lock_refresh:
+        if st.button("🏗️ CLICCA QUI PER DISEGNARE IL RECINTO"):
+            st.session_state.lock_refresh = True
+            st.rerun()
+    
     out = st_folium(m, width="100%", height=650, key="main_map")
     
-    if out and out.get('all_drawings'):
+    if out and out.get('all_drawings') and len(out['all_drawings']) > 0:
         raw_coords = out['all_drawings'][-1]['geometry']['coordinates'][0]
         new_poly = [[p[1], p[0]] for p in raw_coords]
+        
         if st.button("💾 Conferma e Salva Nuovo Recinto"):
             with conn.session as s:
                 s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), {"coords": json.dumps(new_poly)})
                 s.commit()
+            st.session_state.lock_refresh = False
             st.success("Recinto aggiornato!")
             st.rerun()
 
