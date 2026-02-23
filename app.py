@@ -1,4 +1,4 @@
-import streamlit as st
+import streamlit as st  
 import folium
 from streamlit_folium import st_folium
 from folium.plugins import Draw
@@ -10,8 +10,24 @@ from streamlit_autorefresh import st_autorefresh
 # --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# Aggiornamento automatico della dashboard ogni 30 secondi
-st_autorefresh(interval=30000, key="datarefresh")
+# >>> MODIFICA: stato toggle per pausa refresh
+if "pause_refresh" not in st.session_state:
+    st.session_state["pause_refresh"] = False
+
+# >>> MODIFICA: pulsante "matita" + indicatore modalità
+col_edit_btn, col_edit_lbl = st.columns([1, 6])
+with col_edit_btn:
+    if st.button("✏️", help="Pausa/Riprendi refresh automatico"):
+        st.session_state["pause_refresh"] = not st.session_state["pause_refresh"]
+        st.rerun()
+
+with col_edit_lbl:
+    if st.session_state["pause_refresh"]:
+        st.markdown("**🟨 Modalità edit recinto**")
+
+# Aggiornamento automatico della dashboard ogni 30 secondi (solo se NON in pausa)
+if not st.session_state["pause_refresh"]:
+    st_autorefresh(interval=30000, key="datarefresh")
 
 # Connessione a Supabase tramite SQLAlchemy
 conn = st.connection("postgresql", type="sql")
