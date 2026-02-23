@@ -10,6 +10,21 @@ from streamlit_autorefresh import st_autorefresh
 # --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
+# Inizializziamo lo stato del blocco se non esiste
+if "lock_refresh" not in st.session_state:
+    st.session_state.lock_refresh = False
+
+# FIX REFRESH RANDOM: Usiamo una chiave statica e chiamiamo il refresh 
+# solo se non siamo in modalità "blocco". 
+# NOTA: st_autorefresh deve essere fuori da logiche condizionali troppo complesse 
+# per non perdere il sync del timer.
+if not st.session_state.lock_refresh:
+    # La chiave "main_timer" impedisce a Streamlit di creare nuovi timer duplicati
+    st_autorefresh(interval=30000, key="main_timer") 
+else:
+    st.sidebar.warning("⚠️ REFRESH SOSPESO")
+
+
 # Aggiornamento automatico della dashboard ogni 30 secondi
 st_autorefresh(interval=30000, key="datarefresh")
 
