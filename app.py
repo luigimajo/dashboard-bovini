@@ -1,34 +1,34 @@
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
+import time
+
+# --- 1. REFRESH PRIORITARIO (Eseguito prima di tutto) ---
+st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
+
+if "lock_refresh" not in st.session_state:
+    st.session_state.lock_refresh = False
+
+# Il timer viene renderizzato subito in un'area dedicata
+refresh_area = st.empty()
+with refresh_area:
+    if not st.session_state.lock_refresh:
+        # Key fissa per stabilità totale
+        st_autorefresh(interval=30000, key="timer_primario_stabile")
+    else:
+        st.sidebar.warning("⚠️ REFRESH SOSPESO")
+
+# --- 2. IMPORT LIBRERIE PESANTI (Dopo il timer) ---
 import folium
 from streamlit_folium import st_folium
 from folium.plugins import Draw
 import json
 import pandas as pd
 from sqlalchemy import text
-from streamlit_autorefresh import st_autorefresh
 
-# --- 1. CONFIGURAZIONE PAGINA ---
-st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
-
-# Inizializzazione sicura dello stato
-if "lock_refresh" not in st.session_state:
-    st.session_state.lock_refresh = False
-
-# --- 2. GESTIONE REFRESH (UNICO E STATICO) ---
-# Usiamo una KEY FISSA ("constant_timer"). 
-# Se la chiave è fissa, Streamlit NON PUÒ creare un secondo timer: sovrascrive sempre il precedente.
-if not st.session_state.lock_refresh:
-    st_autorefresh(interval=30000, key="constant_timer")
-else:
-    st.sidebar.warning("⚠️ REFRESH BLOCCATO")
-    if st.sidebar.button("🔓 SBLOCCA ORA"):
-        st.session_state.lock_refresh = False
-        st.rerun()
-
-# --- 3. CARICAMENTO DATI ---
+# --- 3. CARICAMENTO DATI OTTIMIZZATO ---
 conn = st.connection("postgresql", type="sql")
 
-@st.cache_data(ttl=0) # Forza il ricaricamento dal DB senza cache
+@st.cache_data(ttl=2) # Cache brevissima per non bloccare il flusso dello script
 def load_data():
     try:
         df_m = conn.query("SELECT * FROM mandria ORDER BY nome ASC", ttl=0)
@@ -43,17 +43,14 @@ def load_data():
 
 df_mandria, saved_coords = load_data()
 
-# --- 4. COSTRUZIONE MAPPA ---
-# (Uso coordinate medie per centrare o default)
+# --- 4. MAPPA E LAYOUT ---
+# (Qui il tuo codice della mappa rimane identico)
 c_lat, c_lon = 37.9747, 13.5753
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
 folium.TileLayer(
-    tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-    attr='Google Satellite',
-    name='Google Satellite',
-    overlay=False,
-    control=False
+    tiles='https://mt1.google.com{x}&y={y}&z={z}',
+    attr='Google Satellite', name='Google Satellite', overlay=False, control=False
 ).add_to(m)
 
 if saved_coords:
@@ -66,19 +63,21 @@ for _, row in df_mandria.iterrows():
 
 Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
 
-# --- 5. LAYOUT ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
 col_map, col_table = st.columns([3, 1])
 
 with col_map:
-    # Interruttore per il disegno
+    # Gestione Blocco Disegno
     if not st.session_state.lock_refresh:
         if st.button("🏗️ INIZIA DISEGNO (Blocca Refresh)"):
             st.session_state.lock_refresh = True
             st.rerun()
-    
-    # Visualizzazione Mappa (KEY STATICA per evitare raddoppi)
-    out = st_folium(m, width="100%", height=600, key="single_map_instance")
+    else:
+        if st.button("🔓 ANNULLA E SBLOCCA"):
+            st.session_state.lock_refresh = False
+            st.rerun()
+
+    out = st_folium(m, width="100%", height=600, key="mappa_unica")
     
     if out and out.get('all_drawings') and len(out['all_drawings']) > 0:
         if st.button("💾 SALVA NUOVO RECINTO"):
