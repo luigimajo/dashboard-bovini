@@ -49,8 +49,11 @@ c_lat, c_lon = 37.9747, 13.5753
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
 folium.TileLayer(
-    tiles='https://mt1.google.com{x}&y={y}&z={z}',
-    attr='Google Satellite', name='Google Satellite', overlay=False, control=False
+    tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+    attr='Google Satellite',
+    name='Google Satellite',
+    overlay=False,
+    control=False
 ).add_to(m)
 
 if saved_coords:
