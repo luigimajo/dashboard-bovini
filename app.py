@@ -9,7 +9,7 @@ from streamlit_autorefresh import st_autorefresh
 
 # Aggiornamento automatico della dashboard ogni 30 secondi
 # --- CONFIGURAZIONE PAGINA ---
-st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI")
+st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
 # Inizializziamo lo stato del blocco refresh se non esiste
 if "lock_refresh" not in st.session_state:
