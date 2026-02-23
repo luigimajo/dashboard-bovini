@@ -16,7 +16,7 @@ placeholder_timer = st.empty()
 
 with placeholder_timer:
     # Usiamo una key numerica basata sul tempo per forzare il sync iniziale
-st_autorefresh(interval=30000, key="timer_stabile_30s")
+    st_autorefresh(interval=30000, key="datarefresh")
     
 
 # --- CONNESSIONE E CARICAMENTO DATI ---
