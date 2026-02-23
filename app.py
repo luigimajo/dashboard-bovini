@@ -10,23 +10,10 @@ from streamlit_autorefresh import st_autorefresh
 # --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# Inizializziamo lo stato del blocco se non esiste
-if "lock_refresh" not in st.session_state:
-    st.session_state.lock_refresh = False
-
-# FIX REFRESH RANDOM: Usiamo una chiave statica e chiamiamo il refresh 
-# solo se non siamo in modalità "blocco". 
-# NOTA: st_autorefresh deve essere fuori da logiche condizionali troppo complesse 
-# per non perdere il sync del timer.
-if not st.session_state.lock_refresh:
-    # La chiave "main_timer" impedisce a Streamlit di creare nuovi timer duplicati
-    st_autorefresh(interval=30000, key="main_timer") 
-else:
-    st.sidebar.warning("⚠️ REFRESH SOSPESO")
-
-
-# Aggiornamento automatico della dashboard ogni 30 secondi
-st_autorefresh(interval=30000, key="datarefresh")
+# --- UNICA MODIFICA PER STABILIZZARE IL REFRESH ---
+# Usiamo una 'key' fissa. Senza questa, Streamlit crea nuovi timer ogni volta 
+# che tocchi la mappa, causando refresh ogni pochi secondi.
+st_autorefresh(interval=30000, key="timer_unico_stabile")
 
 # Connessione a Supabase tramite SQLAlchemy
 conn = st.connection("postgresql", type="sql")
@@ -40,13 +27,23 @@ def load_data():
         df_g = conn.query("SELECT * FROM gateway ORDER BY ultima_attivita DESC", ttl=0)
         # Carichiamo il Recinto
         df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
-        coords = json.loads(df_r.iloc[0]['coords']) if not df_r.empty else []
+        
+        # Gestione sicura dei dati estratti
+        if not df_r.empty and df_r.iloc[0]['coords']:
+            coords = json.loads(df_r.iloc[0]['coords'])
+        else:
+            coords = []
+            
         return df_m, df_g, coords
     except Exception as e:
         st.error(f"Errore database: {e}")
         return pd.DataFrame(), pd.DataFrame(), []
 
 df_mandria, df_gateways, saved_coords = load_data()
+
+# --- IL RESTO DEL TUO CODICE RIMANE INVARIATO ---
+# (Inserisci qui tutta la parte della sidebar, mappa e tabelle così com'erano)
+
 
 # --- SIDEBAR: STATO INFRASTRUTTURA (GATEWAY) ---
 st.sidebar.header("📡 STATO RETE LORA")
