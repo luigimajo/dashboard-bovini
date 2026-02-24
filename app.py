@@ -12,36 +12,29 @@ import time
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# --- 2. GLOBAL LOCK (L'UNICO MODO PER FERMARE LE TRIPLETTES) ---
-# st.cache_resource crea un oggetto condiviso tra TUTTI i processi dell'app
-@st.cache_resource
-def get_global_lock():
-    return {"last_run": 0.0}
+# --- 2. ANTI-TRIPLETTE: KEY DINAMICA DI SESSIONE ---
+# Se usiamo una key che cambia ad ogni esecuzione, il browser killa il timer precedente.
+if "run_count" not in st.session_state:
+    st.session_state.run_count = 0
+st.session_state.run_count += 1
 
-global_lock = get_global_lock()
-ora_attuale = time.time()
+# Il timer JavaScript viene sovrascritto a ogni esecuzione, impedendo l'accumulo
+st_autorefresh(interval=30000, key=f"timer_anti_scarica_{st.session_state.run_count}")
 
-# Se l'ultimo refresh globale è avvenuto meno di 15 secondi fa, questa è una scarica
-is_scarica = (ora_attuale - global_lock["last_run"]) < 15
-
-if not is_scarica:
-    global_lock["last_run"] = ora_attuale
-
-# --- 3. REFRESH STABILIZZATO ---
-st_autorefresh(interval=30000, key="timer_unico_stabile_30s")
+# Timestamp millesimale per debug
 ora_log = datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
-# --- 4. CARICAMENTO DATI (Solo se NON è una scarica) ---
+# --- 3. CARICAMENTO DATI ---
 conn = st.connection("postgresql", type="sql")
 
-@st.cache_data(ttl=10) # Cache di 10s per servire i dati alle scariche senza interrogare il DB
+@st.cache_data(ttl=5)
 def load_data():
     try:
         df_m = conn.query("SELECT * FROM mandria ORDER BY nome ASC", ttl=0)
         df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
         coords = []
         if not df_r.empty:
-            val = df_r.iloc[0]['coords']
+            val = df_r.iloc['coords']
             coords = json.loads(val) if isinstance(val, str) else val
         return df_m, coords
     except:
@@ -49,14 +42,14 @@ def load_data():
 
 df_mandria, saved_coords = load_data()
 
-# --- 5. COSTRUZIONE MAPPA ---
+# --- 4. COSTRUZIONE MAPPA CON TUO SATELLITE GOOGLE ---
 df_valid = df_mandria.dropna(subset=['lat', 'lon'])
 df_valid = df_valid[(df_valid['lat'] != 0) & (df_valid['lon'] != 0)]
 c_lat, c_lon = (df_valid['lat'].mean(), df_valid['lon'].mean()) if not df_valid.empty else (37.9747, 13.5753)
 
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
-# --- IL TUO SATELLITE GOOGLE (FISSO) ---
+# --- BLOCCO SATELLITE GOOGLE RICHIESTO ---
 folium.TileLayer(
     tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
     attr='Google Satellite',
@@ -75,19 +68,16 @@ for _, row in df_mandria.iterrows():
 
 Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
 
-# --- 6. LAYOUT ---
+# --- 5. LAYOUT ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
-st.sidebar.info(f"Esecuzione: {ora_log}")
+st.sidebar.metric("⏱️ Refresh n.", st.session_state.run_count)
+st.sidebar.write(f"Ora: {ora_log}")
 
-if is_scarica:
-    st.sidebar.warning("⚡ Scarica bloccata dal Global Lock")
-
-col_map, col_table = st.columns([3, 1])
+col_map, col_table = st.columns(2)
 
 with col_map:
-    # Mostriamo i dati dell'ultima esecuzione valida
-    st.caption(f"Ultimo aggiornamento valido alle: **{datetime.fromtimestamp(global_lock['last_run']).strftime('%H:%M:%S')}**")
-    st_folium(m, width="100%", height=650, key="mappa_fissa")
+    st.caption(f"Visualizzazione stabile alle: **{ora_log}**")
+    st_folium(m, width="100%", height=650, key=f"map_{st.session_state.run_count}")
 
 with col_table:
     st.subheader("⚠️ Emergenze")
@@ -98,5 +88,6 @@ st.divider()
 st.subheader("📝 Storico Mandria")
 st.dataframe(df_mandria, use_container_width=True, hide_index=True)
 
-# Breve pausa finale per scaricare il server
+# --- 6. RITARDO DI STABILIZZAZIONE FINALE ---
+# Fondamentale per dare tempo al browser di ripulire i vecchi timer
 time.sleep(2)
