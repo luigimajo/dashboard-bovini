@@ -15,7 +15,8 @@ st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 # --- 2. FILTRO ANTI-SCARICA ---
 ora_attuale_unix = time.time()
 if "ultimo_refresh_effettivo" not in st.session_state:
-    st.session_state.ultimo_refresh_effettivo = 0.0
+#    st.session_state.ultimo_refresh_effettivo = 0.0
+    st.session_state.ultimo_refresh_effettivo = ora_attuale_unix
 if "df_cache" not in st.session_state:
     st.session_state.df_cache = pd.DataFrame()
 if "coords_cache" not in st.session_state:
