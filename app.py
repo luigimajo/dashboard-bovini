@@ -12,19 +12,18 @@ import time
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# --- 2. REFRESH STABILIZZATO (SOLUZIONE AI TRIPLI REFRESH) ---
-# Usiamo un timestamp arrotondato a 30 secondi per la KEY. 
-# Questo forza il browser a resettare il timer se ce n'è uno vecchio attivo.
+# --- 2. REFRESH STABILIZZATO (ANTI-REPLICAZIONE) ---
+# Usiamo una KEY basata sul blocco di 30 secondi attuale per resettare i timer fantasma
 timestamp_stabile = int(time.time() // 30)
 
 refresh_area = st.empty()
 with refresh_area:
     st_autorefresh(interval=30000, key=f"timer_stabile_{timestamp_stabile}")
 
-# Timestamp per il monitoraggio visivo
+# Timestamp per monitoraggio visivo nel sidebar
 ora_esecuzione = datetime.now().strftime("%H:%M:%S")
 
-# --- 3. CONNESSIONE E DATI ---
+# --- 3. CONNESSIONE E CARICAMENTO DATI ---
 conn = st.connection("postgresql", type="sql")
 
 @st.cache_data(ttl=2)
@@ -34,7 +33,7 @@ def load_data():
         df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
         coords = []
         if not df_r.empty:
-            val = df_r.iloc[0]['coords'] # Accesso per riga/colonna sicuro
+            val = df_r.iloc[0]['coords'] # Accesso corretto alla riga 0
             coords = json.loads(val) if isinstance(val, str) else val
         return df_m, coords
     except:
@@ -42,16 +41,16 @@ def load_data():
 
 df_mandria, saved_coords = load_data()
 
-# --- 4. COSTRUZIONE MAPPA (GOOGLE SATELLITE FISSO) ---
+# --- 4. COSTRUZIONE MAPPA CON SATELLITE GOOGLE ---
 df_valid = df_mandria.dropna(subset=['lat', 'lon'])
 df_valid = df_valid[(df_valid['lat'] != 0) & (df_valid['lon'] != 0)]
 c_lat, c_lon = (df_valid['lat'].mean(), df_valid['lon'].mean()) if not df_valid.empty else (37.9747, 13.5753)
 
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
-# SATELLITE GOOGLE (Richiesto)
+# --- BLOCCO SATELLITE GOOGLE RICHIESTO ---
 folium.TileLayer(
-    tiles='https://mt1.google.com{x}&y={y}&z={z}',
+    tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
     attr='Google Satellite',
     name='Google Satellite',
     overlay=False,
@@ -86,7 +85,6 @@ st.divider()
 st.subheader("📝 Storico Mandria")
 st.dataframe(df_mandria, use_container_width=True, hide_index=True)
 
-# --- 6. RITARDO DI SICUREZZA (ANTI-REPLICAZIONE) ---
-# Questo comando "addormenta" lo script per 2 secondi prima di finire.
-# Impedisce che refresh multipli si accavallino mandando in crash il frontend.
+# --- 6. RITARDO DI SICUREZZA FINALE ---
+# Evita che refresh multipli si accavallino in frazioni di secondo
 time.sleep(2)
