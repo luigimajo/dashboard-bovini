@@ -31,7 +31,7 @@ ora_esecuzione = datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
 # --- 3. CARICAMENTO DATI (Solo se NON è una scarica o se la cache è vuota) ---
 if not is_scarica or st.session_state.df_cache.empty:
-    st_autorefresh(interval=30000, key="timer_unico_stabile")
+    
     st.session_state.ultimo_refresh_effettivo = ora_attuale_unix
     conn = st.connection("postgresql", type="sql")
     try:
@@ -100,6 +100,7 @@ if not df_mandria.empty:
     st.dataframe(df_mandria, use_container_width=True, hide_index=True)
 else:
     st.warning("Caricamento dati in corso...")
-
+if not is_scarica:
+    st_autorefresh(interval=30000, key="timer_unico_stabile")
 # Breve sleep per stabilizzare
 time.sleep(2)
