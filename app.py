@@ -73,7 +73,7 @@ if not df_mandria.empty:
 
     # --- IL TUO SATELLITE GOOGLE (FISSO) ---
     folium.TileLayer(
-        tiles='https://mt1.google.com{x}&y={y}&z={z}',
+        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
         attr='Google Satellite',
         name='Google Satellite',
         overlay=False,
