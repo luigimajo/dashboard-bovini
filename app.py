@@ -12,7 +12,7 @@ import time
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# --- 2. REFRESH STABILIZZATO (ANTI-REPLICAZIONE) ---
+# --- 2. REFRESH STABILIZZATO ---
 timestamp_stabile = int(time.time() // 30)
 refresh_area = st.empty()
 with refresh_area:
@@ -31,6 +31,7 @@ def load_data():
         df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
         coords = []
         if not df_r.empty:
+            # Accesso corretto alla prima riga per evitare TypeError
             val = df_r.iloc[0]['coords']
             coords = json.loads(val) if isinstance(val, str) else val
         return df_m, coords
@@ -65,11 +66,12 @@ for _, row in df_mandria.iterrows():
 
 Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
 
-# --- 5. LAYOUT ---
+# --- 5. LAYOUT (FIXED: st.columns richiede argomenti) ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
 st.sidebar.metric("⏱️ Ultimo Refresh", ora_esecuzione)
 
-col_map, col_table = st.columns()
+# Definiamo 2 colonne con rapporto 3:1
+col_map, col_table = st.columns([3, 1])
 
 with col_map:
     st.caption(f"Esecuzione script alle: **{ora_esecuzione}**")
