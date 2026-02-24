@@ -8,50 +8,69 @@ import pandas as pd
 from sqlalchemy import text
 from datetime import datetime
 import time
+import os
 
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# --- 2. FILTRO ANTI-SCARICA ---
-ora_attuale_unix = time.time()
-if "ultimo_refresh_effettivo" not in st.session_state:
-#    st.session_state.ultimo_refresh_effettivo = 0.0
-    st.session_state.ultimo_refresh_effettivo = ora_attuale_unix
-if "df_cache" not in st.session_state:
-    st.session_state.df_cache = pd.DataFrame()
-if "coords_cache" not in st.session_state:
-    st.session_state.coords_cache = []
+# --- 2. SEMAFORO ANTI-SCARICA (LIVELLO SISTEMA) ---
+# Usiamo un file per coordinare i processi paralleli ed eliminare le "triplettes"
+SEMAFORO_FILE = "/tmp/app_last_run.txt"
+ora_attuale = time.time()
 
-# Determiniamo se è una scarica (meno di 15 secondi)
-is_scarica = (ora_attuale_unix - st.session_state.ultimo_refresh_effettivo) < 15
-
-# Timer sempre attivo con KEY fissa per evitare duplicati
-# st_autorefresh(interval=30000, key="timer_unico_stabile")
-
-ora_esecuzione = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-
-# --- 3. CARICAMENTO DATI (Solo se NON è una scarica o se la cache è vuota) ---
-if not is_scarica or st.session_state.df_cache.empty:
+def check_and_update_semaphore():
+    if os.path.exists(SEMAFORO_FILE):
+        with open(SEMAFORO_FILE, "r") as f:
+            try:
+                last_run = float(f.read())
+            except:
+                last_run = 0
+        # Se l'ultima esecuzione globale è avvenuta meno di 10 secondi fa, BLOCCA TUTTO
+        if (ora_attuale - last_run) < 10:
+            return False
     
-    st.session_state.ultimo_refresh_effettivo = ora_attuale_unix
-    conn = st.connection("postgresql", type="sql")
+    with open(SEMAFORO_FILE, "w") as f:
+        f.write(str(ora_attuale))
+    return True
+
+# Eseguiamo il controllo
+is_esecuzione_valida = check_and_update_semaphore()
+
+# --- 3. REFRESH STABILIZZATO ---
+# Il timer deve avere una KEY fissa e UNICA per non moltiplicarsi
+st_autorefresh(interval=30000, key="timer_unico_stabile_30s")
+
+# Timestamp con millisecondi per il tuo controllo
+ora_log = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+# --- 4. LOGICA DI VISUALIZZAZIONE ---
+st.title("🛰️ MONITORAGGIO BOVINI H24")
+st.sidebar.info(f"Ultimo segnale ricevuto: {ora_log}")
+
+if not is_esecuzione_valida:
+    # Se è una scarica, mostriamo un avviso leggero e non facciamo nulla (niente DB, niente Mappa)
+    st.warning(f"⚡ Scarica di refresh intercettata alle {ora_log}. Attesa prossimo ciclo...")
+    st.stop()
+
+# --- 5. CARICAMENTO DATI (Solo se l'esecuzione è validata dal semaforo) ---
+conn = st.connection("postgresql", type="sql")
+
+@st.cache_data(ttl=2)
+def load_data():
     try:
         df_m = conn.query("SELECT * FROM mandria ORDER BY nome ASC", ttl=0)
         df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
-        
-        st.session_state.df_cache = df_m
+        coords = []
         if not df_r.empty:
-            val = df_r.iloc[0]['coords']
-            st.session_state.coords_cache = json.loads(val) if isinstance(val, str) else val
+            val = df_r.iloc[0]['coords'] # Accesso sicuro alla riga 0
+            coords = json.loads(val) if isinstance(val, str) else val
+        return df_m, coords
     except Exception as e:
-        st.error(f"Errore DB: {e}")
+        return pd.DataFrame(), []
 
-# Usiamo i dati dalla sessione (così l'app non fallisce mai se una scarica salta il DB)
-df_mandria = st.session_state.df_cache
-saved_coords = st.session_state.coords_cache
+df_mandria, saved_coords = load_data()
 
-# --- 4. COSTRUZIONE MAPPA ---
-# Verifichiamo che i dati esistano prima di procedere
+# --- 6. COSTRUZIONE MAPPA ---
 if not df_mandria.empty:
     df_valid = df_mandria.dropna(subset=['lat', 'lon'])
     df_valid = df_valid[(df_valid['lat'] != 0) & (df_valid['lon'] != 0)]
@@ -59,7 +78,7 @@ if not df_mandria.empty:
 
     m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
-    # IL TUO SATELLITE GOOGLE (Richiesto)
+    # --- IL TUO SATELLITE GOOGLE (FISSO) ---
     folium.TileLayer(
         tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
         attr='Google Satellite',
@@ -78,17 +97,10 @@ if not df_mandria.empty:
 
     Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
 
-# --- 5. LAYOUT ---
-st.title("🛰️ MONITORAGGIO BOVINI H24")
-st.sidebar.metric("⏱️ Ultimo Refresh", ora_esecuzione)
-
-if is_scarica:
-    st.sidebar.info("⚡ Scarica ignorata: uso dati in memoria.")
-
-if not df_mandria.empty:
+    # --- LAYOUT FINALE ---
     col_map, col_table = st.columns([3, 1])
     with col_map:
-        st.caption(f"Dati aggiornati alle: **{ora_esecuzione}**")
+        st.caption(f"Dati aggiornati correttamente alle: **{ora_log}**")
         st_folium(m, width="100%", height=650, key="mappa_fissa")
 
     with col_table:
@@ -99,9 +111,6 @@ if not df_mandria.empty:
     st.divider()
     st.subheader("📝 Storico Mandria")
     st.dataframe(df_mandria, use_container_width=True, hide_index=True)
-else:
-    st.warning("Caricamento dati in corso...")
-if not is_scarica:
-    st_autorefresh(interval=30000, key="timer_unico_stabile")
-# Breve sleep per stabilizzare
+
+# --- 7. RITARDO DI STABILIZZAZIONE ---
 time.sleep(2)
