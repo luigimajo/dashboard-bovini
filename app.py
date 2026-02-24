@@ -12,52 +12,52 @@ import time
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# --- 2. FILTRO ANTI-SCARICA (EVITA SCHERMO BIANCO) ---
+# --- 2. FILTRO ANTI-SCARICA ---
 ora_attuale_unix = time.time()
 if "ultimo_refresh_effettivo" not in st.session_state:
     st.session_state.ultimo_refresh_effettivo = 0.0
+if "df_cache" not in st.session_state:
+    st.session_state.df_cache = pd.DataFrame()
+if "coords_cache" not in st.session_state:
+    st.session_state.coords_cache = []
 
-# Calcoliamo se questo refresh è una "scarica" (meno di 15 secondi dal precedente)
+# Determiniamo se è una scarica (meno di 15 secondi)
 is_scarica = (ora_attuale_unix - st.session_state.ultimo_refresh_effettivo) < 15
 
-# --- 3. REFRESH STABILIZZATO ---
-# Il timer deve essere SEMPRE presente per evitare che l'app muoia
+# Timer sempre attivo con KEY fissa per evitare duplicati
 st_autorefresh(interval=30000, key="timer_unico_stabile")
 
-# Se NON è una scarica, aggiorniamo il timestamp di esecuzione reale
-if not is_scarica:
-    st.session_state.ultimo_refresh_effettivo = ora_attuale_unix
-
-# Timestamp con MILLESIMESIMI per il tuo debug
 ora_esecuzione = datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
-# --- 4. CARICAMENTO DATI E MAPPA (SOLO SE NON È UNA SCARICA) ---
-if not is_scarica:
+# --- 3. CARICAMENTO DATI (Solo se NON è una scarica o se la cache è vuota) ---
+if not is_scarica or st.session_state.df_cache.empty:
+    st.session_state.ultimo_refresh_effettivo = ora_attuale_unix
     conn = st.connection("postgresql", type="sql")
-    
-    @st.cache_data(ttl=2)
-    def load_data():
-        try:
-            df_m = conn.query("SELECT * FROM mandria ORDER BY nome ASC", ttl=0)
-            df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
-            coords = []
-            if not df_r.empty:
-                val = df_r.iloc['coords']
-                coords = json.loads(val) if isinstance(val, str) else val
-            return df_m, coords
-        except:
-            return pd.DataFrame(), []
+    try:
+        df_m = conn.query("SELECT * FROM mandria ORDER BY nome ASC", ttl=0)
+        df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
+        
+        st.session_state.df_cache = df_m
+        if not df_r.empty:
+            val = df_r.iloc[0]['coords']
+            st.session_state.coords_cache = json.loads(val) if isinstance(val, str) else val
+    except Exception as e:
+        st.error(f"Errore DB: {e}")
 
-    df_mandria, saved_coords = load_data()
+# Usiamo i dati dalla sessione (così l'app non fallisce mai se una scarica salta il DB)
+df_mandria = st.session_state.df_cache
+saved_coords = st.session_state.coords_cache
 
-    # --- COSTRUZIONE MAPPA ---
+# --- 4. COSTRUZIONE MAPPA ---
+# Verifichiamo che i dati esistano prima di procedere
+if not df_mandria.empty:
     df_valid = df_mandria.dropna(subset=['lat', 'lon'])
     df_valid = df_valid[(df_valid['lat'] != 0) & (df_valid['lon'] != 0)]
     c_lat, c_lon = (df_valid['lat'].mean(), df_valid['lon'].mean()) if not df_valid.empty else (37.9747, 13.5753)
 
     m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
-    # --- IL TUO SATELLITE GOOGLE (FISSO) ---
+    # IL TUO SATELLITE GOOGLE (Richiesto)
     folium.TileLayer(
         tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
         attr='Google Satellite',
@@ -76,17 +76,17 @@ if not is_scarica:
 
     Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
 
-# --- 5. LAYOUT (SEMPRE VISIBILE) ---
+# --- 5. LAYOUT ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
-st.sidebar.metric("⏱️ Ultimo Refresh Valido", ora_esecuzione)
+st.sidebar.metric("⏱️ Ultimo Refresh", ora_esecuzione)
 
 if is_scarica:
-    st.warning("⚡ Scarica di refresh rilevata: attesa stabilizzazione...")
-    st.info("L'app caricherà i dati al prossimo intervallo di 30s.")
-else:
+    st.sidebar.info("⚡ Scarica ignorata: uso dati in memoria.")
+
+if not df_mandria.empty:
     col_map, col_table = st.columns([3, 1])
     with col_map:
-        st.caption(f"Script eseguito alle: **{ora_esecuzione}**")
+        st.caption(f"Dati aggiornati alle: **{ora_esecuzione}**")
         st_folium(m, width="100%", height=650, key="mappa_fissa")
 
     with col_table:
@@ -97,3 +97,8 @@ else:
     st.divider()
     st.subheader("📝 Storico Mandria")
     st.dataframe(df_mandria, use_container_width=True, hide_index=True)
+else:
+    st.warning("Caricamento dati in corso...")
+
+# Breve sleep per stabilizzare
+time.sleep(2)
