@@ -28,13 +28,14 @@ def check_semaphore():
         try:
             with open(SEMAFORO_FILE, "r") as f:
                 last_run = float(f.read())
-            # Se l'esecuzione è troppo vicina (meno di 10s), segnaliamo scarica
             if (ora_attuale - last_run) < 10:
                 return False
         except: pass
     
-    with open(SEMAFORO_FILE, "w") as f:
-        f.write(str(ora_attuale))
+    try:
+        with open(SEMAFORO_FILE, "w") as f:
+            f.write(str(ora_attuale))
+    except: pass
     return True
 
 is_esecuzione_valida = check_semaphore()
@@ -52,16 +53,16 @@ if is_esecuzione_valida:
         
         st.session_state.df_memory = df_m
         if not df_r.empty:
-            val = df_r.iloc['coords']
+            # Accesso sicuro alla colonna 'coords'
+            val = df_r.iloc[0]['coords']
             st.session_state.coords_memory = json.loads(val) if isinstance(val, str) else val
     except: pass
 
-# Usiamo sempre i dati in memoria (così la mappa non sparisce mai)
+# Usiamo sempre i dati in memoria (persistenza visiva)
 df_mandria = st.session_state.df_memory
 saved_coords = st.session_state.coords_memory
 
 # --- 5. COSTRUZIONE MAPPA ---
-# Definiamo 'm' all'esterno del blocco per evitare NameError
 m = None
 if not df_mandria.empty:
     df_valid = df_mandria.dropna(subset=['lat', 'lon'])
@@ -72,7 +73,7 @@ if not df_mandria.empty:
 
     # --- IL TUO SATELLITE GOOGLE (FISSO) ---
     folium.TileLayer(
-        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+        tiles='https://mt1.google.com{x}&y={y}&z={z}',
         attr='Google Satellite',
         name='Google Satellite',
         overlay=False,
@@ -89,15 +90,16 @@ if not df_mandria.empty:
 
     Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
 
-# --- 6. LAYOUT (SEMPRE RENDERIZZATO) ---
+# --- 6. LAYOUT ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
 st.sidebar.info(f"Ultimo segnale: {ora_log}")
 
 if not is_esecuzione_valida:
-    st.sidebar.warning("⚡ Scarica ignorata (Display persistente)")
+    st.sidebar.warning("⚡ Scarica ignorata (Dati persistenti)")
 
-if m:
-    col_map, col_table = st.columns()
+if not df_mandria.empty and m:
+    # FIX: st.columns richiede il numero di colonne
+    col_map, col_table = st.columns([3, 1])
     with col_map:
         st.caption(f"Dati visualizzati alle: **{ora_log}**")
         st_folium(m, width="100%", height=650, key="mappa_fissa")
@@ -111,7 +113,7 @@ if m:
     st.subheader("📝 Storico Mandria")
     st.dataframe(df_mandria, use_container_width=True, hide_index=True)
 else:
-    st.info("In attesa del primo caricamento dati...")
+    st.info("Caricamento dati iniziale in corso...")
 
-# Breve pausa per scaricare il server
+# Pausa finale per stabilizzare
 time.sleep(2)
