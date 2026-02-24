@@ -87,4 +87,4 @@ st.subheader("📝 Storico Mandria")
 st.dataframe(df_mandria, use_container_width=True, hide_index=True)
 
 # --- 6. RITARDO DI SICUREZZA FINALE ---
-time.sleep(2)
+time.sleep(10)
