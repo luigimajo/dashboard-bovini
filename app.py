@@ -12,22 +12,31 @@ import time
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# --- 2. REFRESH FISSO (SOLUZIONE AL LOOP INFINITO) ---
-# Usiamo una KEY STATICA. Solo così il browser non resetta il timer a ogni secondo.
-if "ultimo_rerun" not in st.session_state:
-    st.session_state.ultimo_rerun = time.time()
+# --- 2. SEMAFORO ATOMICO (SOLUZIONE FINALE ALLE TRIPLETTE) ---
+@st.cache_resource
+def get_global_state():
+    # Questo oggetto è unico per TUTTI i processi dell'app
+    return {"last_execution_time": 0.0}
 
-# Eseguiamo il refresh ogni 30 secondi. 
-# La key "timer_fisso_30s" garantisce che Streamlit non crei duplicati.
-st_autorefresh(interval=30000, key="timer_fisso_30s")
+global_state = get_global_state()
+tempo_attuale = time.time()
 
-# Timestamp millesimale per il tuo monitoraggio
+# Se un altro refresh (della tripletta) prova a partire meno di 10 secondi dopo, lo uccidiamo
+if (tempo_attuale - global_state["last_execution_time"]) < 10:
+    st.stop()
+
+# Se arriviamo qui, l'esecuzione è valida. Aggiorniamo il timestamp globale.
+global_state["last_execution_time"] = tempo_attuale
+
+# --- 3. REFRESH STABILIZZATO ---
+# Key statica per non resettare mai il timer del browser
+st_autorefresh(interval=30000, key="timer_primario_30s")
 ora_log = datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
-# --- 3. CONNESSIONE E CARICAMENTO DATI ---
+# --- 4. CONNESSIONE E CARICAMENTO DATI ---
 conn = st.connection("postgresql", type="sql")
 
-@st.cache_data(ttl=5) # Cache di 5s per stabilizzare le letture dal DB
+@st.cache_data(ttl=2)
 def load_data():
     try:
         df_m = conn.query("SELECT * FROM mandria ORDER BY nome ASC", ttl=0)
@@ -35,7 +44,7 @@ def load_data():
         coords = []
         if not df_r.empty:
             # Recupero sicuro del valore JSON delle coordinate
-            val = df_r.iloc[0]['coords']
+            val = df_r.iloc['coords']
             coords = json.loads(val) if isinstance(val, str) else val
         return df_m, coords
     except:
@@ -43,8 +52,7 @@ def load_data():
 
 df_mandria, saved_coords = load_data()
 
-# --- 4. COSTRUZIONE MAPPA CON IL TUO SATELLITE GOOGLE ---
-# Centriamo la mappa se ci sono dati validi
+# --- 5. COSTRUZIONE MAPPA CON IL TUO SATELLITE GOOGLE ---
 c_lat, c_lon = 37.9747, 13.5753
 if not df_mandria.empty and 'lat' in df_mandria.columns:
     df_v = df_mandria.dropna(subset=['lat', 'lon'])
@@ -73,28 +81,25 @@ for _, row in df_mandria.iterrows():
 
 Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
 
-# --- 5. LAYOUT ---
+# --- 6. LAYOUT ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
-st.sidebar.metric("⏱️ Ora Ultimo Refresh", ora_log)
+st.sidebar.metric("⏱️ Ora Esecuzione", ora_log)
 
 if not df_mandria.empty:
     col_map, col_table = st.columns([3, 1])
 
     with col_map:
-        st.caption(f"Visualizzazione aggiornata alle: **{ora_log}**")
-        st_folium(m, width="100%", height=650, key="mappa_monitoraggio")
+        st.caption(f"Refresh validato alle: **{ora_log}**")
+        st_folium(m, width="100%", height=650, key="mappa_fissa")
 
     with col_table:
-        st.subheader("⚠️ Emergenze")
+        st.subheader("⚠️ Stato")
         df_emergenza = df_mandria[(df_mandria['stato_recinto'] == 'FUORI') | (df_mandria['batteria'] <= 20)]
         st.dataframe(df_emergenza[['nome', 'batteria']], hide_index=True)
 
     st.divider()
     st.subheader("📝 Storico Mandria")
     st.dataframe(df_mandria, use_container_width=True, hide_index=True)
-else:
-    st.warning("Caricamento dati in corso...")
 
-# --- 6. RITARDO DI SICUREZZA (DEBOUNCE) ---
-# Fondamentale per impedire che le "triplettes" browser-side sovraccarichino il server
+# Pausa finale per stabilizzare il server (2 secondi)
 time.sleep(2)
