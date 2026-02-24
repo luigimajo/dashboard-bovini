@@ -13,64 +13,56 @@ import os
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
+# Inizializzazione Cache di Sessione per evitare schermi bianchi
+if "df_memory" not in st.session_state:
+    st.session_state.df_memory = pd.DataFrame()
+if "coords_memory" not in st.session_state:
+    st.session_state.coords_memory = []
+
 # --- 2. SEMAFORO ANTI-SCARICA (LIVELLO SISTEMA) ---
-# Usiamo un file per coordinare i processi paralleli ed eliminare le "triplettes"
 SEMAFORO_FILE = "/tmp/app_last_run.txt"
 ora_attuale = time.time()
 
-def check_and_update_semaphore():
+def check_semaphore():
     if os.path.exists(SEMAFORO_FILE):
-        with open(SEMAFORO_FILE, "r") as f:
-            try:
+        try:
+            with open(SEMAFORO_FILE, "r") as f:
                 last_run = float(f.read())
-            except:
-                last_run = 0
-        # Se l'ultima esecuzione globale è avvenuta meno di 10 secondi fa, BLOCCA TUTTO
-        if (ora_attuale - last_run) < 10:
-            return False
+            # Se l'esecuzione è troppo vicina (meno di 10s), segnaliamo scarica
+            if (ora_attuale - last_run) < 10:
+                return False
+        except: pass
     
     with open(SEMAFORO_FILE, "w") as f:
         f.write(str(ora_attuale))
     return True
 
-# Eseguiamo il controllo
-is_esecuzione_valida = check_and_update_semaphore()
+is_esecuzione_valida = check_semaphore()
 
 # --- 3. REFRESH STABILIZZATO ---
-# Il timer deve avere una KEY fissa e UNICA per non moltiplicarsi
 st_autorefresh(interval=30000, key="timer_unico_stabile_30s")
-
-# Timestamp con millisecondi per il tuo controllo
 ora_log = datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
-# --- 4. LOGICA DI VISUALIZZAZIONE ---
-st.title("🛰️ MONITORAGGIO BOVINI H24")
-st.sidebar.info(f"Ultimo segnale ricevuto: {ora_log}")
-
-if not is_esecuzione_valida:
-    # Se è una scarica, mostriamo un avviso leggero e non facciamo nulla (niente DB, niente Mappa)
-    st.warning(f"⚡ Scarica di refresh intercettata alle {ora_log}. Attesa prossimo ciclo...")
-    st.stop()
-
-# --- 5. CARICAMENTO DATI (Solo se l'esecuzione è validata dal semaforo) ---
-conn = st.connection("postgresql", type="sql")
-
-@st.cache_data(ttl=2)
-def load_data():
+# --- 4. CARICAMENTO DATI (Solo se validato dal semaforo) ---
+if is_esecuzione_valida:
+    conn = st.connection("postgresql", type="sql")
     try:
         df_m = conn.query("SELECT * FROM mandria ORDER BY nome ASC", ttl=0)
         df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
-        coords = []
+        
+        st.session_state.df_memory = df_m
         if not df_r.empty:
-            val = df_r.iloc[0]['coords'] # Accesso sicuro alla riga 0
-            coords = json.loads(val) if isinstance(val, str) else val
-        return df_m, coords
-    except Exception as e:
-        return pd.DataFrame(), []
+            val = df_r.iloc['coords']
+            st.session_state.coords_memory = json.loads(val) if isinstance(val, str) else val
+    except: pass
 
-df_mandria, saved_coords = load_data()
+# Usiamo sempre i dati in memoria (così la mappa non sparisce mai)
+df_mandria = st.session_state.df_memory
+saved_coords = st.session_state.coords_memory
 
-# --- 6. COSTRUZIONE MAPPA ---
+# --- 5. COSTRUZIONE MAPPA ---
+# Definiamo 'm' all'esterno del blocco per evitare NameError
+m = None
 if not df_mandria.empty:
     df_valid = df_mandria.dropna(subset=['lat', 'lon'])
     df_valid = df_valid[(df_valid['lat'] != 0) & (df_valid['lon'] != 0)]
@@ -97,10 +89,17 @@ if not df_mandria.empty:
 
     Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
 
-    # --- LAYOUT FINALE ---
-    col_map, col_table = st.columns([3, 1])
+# --- 6. LAYOUT (SEMPRE RENDERIZZATO) ---
+st.title("🛰️ MONITORAGGIO BOVINI H24")
+st.sidebar.info(f"Ultimo segnale: {ora_log}")
+
+if not is_esecuzione_valida:
+    st.sidebar.warning("⚡ Scarica ignorata (Display persistente)")
+
+if m:
+    col_map, col_table = st.columns()
     with col_map:
-        st.caption(f"Dati aggiornati correttamente alle: **{ora_log}**")
+        st.caption(f"Dati visualizzati alle: **{ora_log}**")
         st_folium(m, width="100%", height=650, key="mappa_fissa")
 
     with col_table:
@@ -111,6 +110,8 @@ if not df_mandria.empty:
     st.divider()
     st.subheader("📝 Storico Mandria")
     st.dataframe(df_mandria, use_container_width=True, hide_index=True)
+else:
+    st.info("In attesa del primo caricamento dati...")
 
-# --- 7. RITARDO DI STABILIZZAZIONE ---
+# Breve pausa per scaricare il server
 time.sleep(2)
