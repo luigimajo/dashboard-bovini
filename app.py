@@ -25,12 +25,13 @@ if "coords_cache" not in st.session_state:
 is_scarica = (ora_attuale_unix - st.session_state.ultimo_refresh_effettivo) < 15
 
 # Timer sempre attivo con KEY fissa per evitare duplicati
-st_autorefresh(interval=30000, key="timer_unico_stabile")
+# st_autorefresh(interval=30000, key="timer_unico_stabile")
 
 ora_esecuzione = datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
 # --- 3. CARICAMENTO DATI (Solo se NON è una scarica o se la cache è vuota) ---
 if not is_scarica or st.session_state.df_cache.empty:
+    st_autorefresh(interval=30000, key="timer_unico_stabile")
     st.session_state.ultimo_refresh_effettivo = ora_attuale_unix
     conn = st.connection("postgresql", type="sql")
     try:
