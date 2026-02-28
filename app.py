@@ -5,28 +5,28 @@ from folium.plugins import Draw
 import json
 import pandas as pd
 from sqlalchemy import text
+from streamlit_autorefresh import st_autorefresh
 from datetime import datetime
 import time
 
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# Inizializzazione stati di sessione
+# Inizializzazione stati persistenti
 if "edit_mode" not in st.session_state:
     st.session_state.edit_mode = False
+if "temp_coords" not in st.session_state:
+    st.session_state.temp_coords = None
 
-# --- 2. LOGICA REFRESH STABILIZZATA ---
-# Se NON siamo in modalità disegno, usiamo un trucco nativo per il refresh 
-# senza caricare plugin che resettano la mappa.
+# --- 2. LOGICA REFRESH (PULIZIA TOTALE IN EDIT) ---
+# Se siamo in edit_mode, NON eseguiamo st_autorefresh. Il timer nel browser sparisce.
 if not st.session_state.edit_mode:
-    # Se il tuo streamlit è vecchio, questo caricherà la pagina ogni 30s
-    # Se vuoi testarlo senza refresh per ora, commenta la riga sotto
-    # st.empty() # Placeholder per stabilità
-    pass 
+    st_autorefresh(interval=30000, key="timer_stabile_30s")
 else:
     st.sidebar.warning("🏗️ MODALITÀ DISEGNO: Refresh Disabilitato")
     if st.sidebar.button("🔓 Esci e annulla"):
         st.session_state.edit_mode = False
+        st.session_state.temp_coords = None
         st.rerun()
 
 ora_log = datetime.now().strftime("%H:%M:%S")
@@ -55,7 +55,7 @@ m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
 # --- BLOCCO SATELLITE GOOGLE RICHIESTO (ESATTO) ---
 folium.TileLayer(
-    tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+    tiles='https://mt1.google.com{x}&y={y}&z={z}',
     attr='Google Satellite',
     name='Google Satellite',
     overlay=False,
@@ -65,6 +65,7 @@ folium.TileLayer(
 if saved_coords:
     folium.Polygon(locations=saved_coords, color="yellow", weight=3, fill=True, fill_opacity=0.2).add_to(m)
 
+# Disegno bovini
 for _, row in df_mandria.iterrows():
     if pd.notna(row['lat']) and row['lat'] != 0:
         color = 'green' if row['stato_recinto'] == 'DENTRO' else 'red'
@@ -82,33 +83,37 @@ with col_map:
             st.session_state.edit_mode = True
             st.rerun()
     
-    # Mappa con key fissa per non resettare al clic dei vertici
+    # Render Mappa - USARE KEY STATICA PER NON RESETTARE AL CLIC
     out = st_folium(m, width="100%", height=650, key="main_map")
     
-    # TASTO SALVA: Sempre visibile se edit_mode è attivo
+    # CATTURA IMMEDIATA DEL DISEGNO (Anche se parziale o appena chiuso)
+    if out and out.get('all_drawings') and len(out['all_drawings']) > 0:
+        raw = out['all_drawings'][-1]['geometry']['coordinates'][0]
+        # Salviamo subito nello stato per evitare la sparizione al ricaricamento
+        st.session_state.temp_coords = [[p[1], p[0]] for p in raw]
+
+    # MOSTRA TASTO SALVA
     if st.session_state.edit_mode:
-        st.info("📍 Disegna il recinto e chiudi il poligono. Poi premi Salva.")
-        if st.button("💾 SALVA NUOVO RECINTO"):
-            if out and out.get('all_drawings') and len(out['all_drawings']) > 0:
-                raw = out['all_drawings'][-1]['geometry']['coordinates'][0]
-                # Inversione Lon/Lat -> Lat/Lon
-                new_poly = [[p[1], p[0]] for p in raw]
-                
+        if st.session_state.temp_coords:
+            st.success("📍 Poligono rilevato in memoria!")
+            if st.button("💾 CONFERMA E SALVA DEFINITIVAMENTE"):
                 with conn.session as s:
                     s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), 
-                              {"coords": json.dumps(new_poly)})
+                              {"coords": json.dumps(st.session_state.temp_coords)})
                     s.commit()
-                
-                st.success("✅ Recinto salvato!")
                 st.session_state.edit_mode = False
+                st.session_state.temp_coords = None
+                st.success("Recinto salvato!")
+                time.sleep(1)
                 st.rerun()
-            else:
-                st.error("⚠️ Nessun poligono completo rilevato. Chiudilo cliccando sul primo punto.")
+        else:
+            st.info("Disegna sulla mappa e chiudi il poligono (clicca sul primo punto).")
 
 with col_table:
-    st.subheader("⚠️ Emergenze")
-    df_em = df_mandria[df_mandria['stato_recinto'] == 'FUORI'] if not df_mandria.empty else pd.DataFrame()
-    st.dataframe(df_em[['nome', 'batteria']] if not df_em.empty else pd.DataFrame(), hide_index=True)
+    st.subheader("⚠️ Stato")
+    if not df_mandria.empty:
+        df_emergenza = df_mandria[(df_mandria['stato_recinto'] == 'FUORI') | (df_mandria['batteria'] <= 20)]
+        st.dataframe(df_emergenza[['nome', 'batteria']], hide_index=True)
 
 st.subheader("📝 Storico Mandria")
 st.dataframe(df_mandria, use_container_width=True, hide_index=True)
