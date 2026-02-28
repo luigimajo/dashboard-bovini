@@ -1,4 +1,5 @@
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 import folium
 from streamlit_folium import st_folium
 from folium.plugins import Draw
@@ -7,108 +8,112 @@ import pandas as pd
 from sqlalchemy import text
 from datetime import datetime
 import time
+import os
 
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# Inizializzazione stati di sessione
-if "edit_mode" not in st.session_state:
-    st.session_state.edit_mode = False
+# Inizializzazione Cache di Sessione per evitare schermi bianchi
+if "df_memory" not in st.session_state:
+    st.session_state.df_memory = pd.DataFrame()
+if "coords_memory" not in st.session_state:
+    st.session_state.coords_memory = []
 
-# --- 2. LOGICA REFRESH STABILIZZATA ---
-# Se NON siamo in modalità disegno, usiamo un trucco nativo per il refresh 
-# senza caricare plugin che resettano la mappa.
-if not st.session_state.edit_mode:
-    # Se il tuo streamlit è vecchio, questo caricherà la pagina ogni 30s
-    # Se vuoi testarlo senza refresh per ora, commenta la riga sotto
-    # st.empty() # Placeholder per stabilità
-    pass 
-else:
-    st.sidebar.warning("🏗️ MODALITÀ DISEGNO: Refresh Disabilitato")
-    if st.sidebar.button("🔓 Esci e annulla"):
-        st.session_state.edit_mode = False
-        st.rerun()
+# --- 2. SEMAFORO ANTI-SCARICA (LIVELLO SISTEMA) ---
+SEMAFORO_FILE = "/tmp/app_last_run.txt"
+ora_attuale = time.time()
 
-ora_log = datetime.now().strftime("%H:%M:%S")
-conn = st.connection("postgresql", type="sql")
+def check_semaphore():
+    if os.path.exists(SEMAFORO_FILE):
+        try:
+            with open(SEMAFORO_FILE, "r") as f:
+                last_run = float(f.read())
+            if (ora_attuale - last_run) < 10:
+                return False
+        except: pass
+    
+    try:
+        with open(SEMAFORO_FILE, "w") as f:
+            f.write(str(ora_attuale))
+    except: pass
+    return True
 
-# --- 3. CARICAMENTO DATI ---
-@st.cache_data(ttl=2)
-def load_data():
+is_esecuzione_valida = check_semaphore()
+
+# --- 3. REFRESH STABILIZZATO ---
+st_autorefresh(interval=30000, key="timer_unico_stabile_30s")
+ora_log = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+# --- 4. CARICAMENTO DATI (Solo se validato dal semaforo) ---
+if is_esecuzione_valida:
+    conn = st.connection("postgresql", type="sql")
     try:
         df_m = conn.query("SELECT * FROM mandria ORDER BY nome ASC", ttl=0)
         df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
-        coords = json.loads(df_r.iloc[0]['coords']) if not df_r.empty else []
-        return df_m, coords
-    except:
-        return pd.DataFrame(), []
+        
+        st.session_state.df_memory = df_m
+        if not df_r.empty:
+            # Accesso sicuro alla colonna 'coords'
+            val = df_r.iloc[0]['coords']
+            st.session_state.coords_memory = json.loads(val) if isinstance(val, str) else val
+    except: pass
 
-df_mandria, saved_coords = load_data()
+# Usiamo sempre i dati in memoria (persistenza visiva)
+df_mandria = st.session_state.df_memory
+saved_coords = st.session_state.coords_memory
 
-# --- 4. COSTRUZIONE MAPPA ---
-c_lat, c_lon = 37.9747, 13.5753
-if not df_mandria.empty and 'lat' in df_mandria.columns:
-    df_v = df_mandria.dropna(subset=['lat', 'lon']).query("lat!=0")
-    if not df_v.empty: c_lat, c_lon = df_v['lat'].mean(), df_v['lon'].mean()
+# --- 5. COSTRUZIONE MAPPA ---
+m = None
+if not df_mandria.empty:
+    df_valid = df_mandria.dropna(subset=['lat', 'lon'])
+    df_valid = df_valid[(df_valid['lat'] != 0) & (df_valid['lon'] != 0)]
+    c_lat, c_lon = (df_valid['lat'].mean(), df_valid['lon'].mean()) if not df_valid.empty else (37.9747, 13.5753)
 
-m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
+    m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
-# --- BLOCCO SATELLITE GOOGLE RICHIESTO (ESATTO) ---
-folium.TileLayer(
-    tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-    attr='Google Satellite',
-    name='Google Satellite',
-    overlay=False,
-    control=False
-).add_to(m)
+    # --- IL TUO SATELLITE GOOGLE (FISSO) ---
+    folium.TileLayer(
+        tiles='https://mt1.google.com{x}&y={y}&z={z}',
+        attr='Google Satellite',
+        name='Google Satellite',
+        overlay=False,
+        control=False
+    ).add_to(m)
 
-if saved_coords:
-    folium.Polygon(locations=saved_coords, color="yellow", weight=3, fill=True, fill_opacity=0.2).add_to(m)
+    if saved_coords:
+        folium.Polygon(locations=saved_coords, color="yellow", weight=3, fill=True, fill_opacity=0.2).add_to(m)
 
-for _, row in df_mandria.iterrows():
-    if pd.notna(row['lat']) and row['lat'] != 0:
-        color = 'green' if row['stato_recinto'] == 'DENTRO' else 'red'
-        folium.Marker([row['lat'], row['lon']], icon=folium.Icon(color=color, icon='info-sign')).add_to(m)
+    for _, row in df_mandria.iterrows():
+        if pd.notna(row['lat']) and row['lat'] != 0:
+            color = 'green' if row['stato_recinto'] == 'DENTRO' else 'red'
+            folium.Marker([row['lat'], row['lon']], icon=folium.Icon(color=color, icon='info-sign')).add_to(m)
 
-Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
+    Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
 
-# --- 5. LAYOUT ---
+# --- 6. LAYOUT ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
-col_map, col_table = st.columns([3, 1])
+st.sidebar.info(f"Ultimo segnale: {ora_log}")
 
-with col_map:
-    if not st.session_state.edit_mode:
-        if st.button("🏗️ INIZIA DISEGNO NUOVO RECINTO"):
-            st.session_state.edit_mode = True
-            st.rerun()
-    
-    # Mappa con key fissa per non resettare al clic dei vertici
-    out = st_folium(m, width="100%", height=650, key="main_map")
-    
-    # TASTO SALVA: Sempre visibile se edit_mode è attivo
-    if st.session_state.edit_mode:
-        st.info("📍 Disegna il recinto e chiudi il poligono. Poi premi Salva.")
-        if st.button("💾 SALVA NUOVO RECINTO"):
-            if out and out.get('all_drawings') and len(out['all_drawings']) > 0:
-                raw = out['all_drawings'][-1]['geometry']['coordinates'][0]
-                # Inversione Lon/Lat -> Lat/Lon
-                new_poly = [[p[1], p[0]] for p in raw]
-                
-                with conn.session as s:
-                    s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), 
-                              {"coords": json.dumps(new_poly)})
-                    s.commit()
-                
-                st.success("✅ Recinto salvato!")
-                st.session_state.edit_mode = False
-                st.rerun()
-            else:
-                st.error("⚠️ Nessun poligono completo rilevato. Chiudilo cliccando sul primo punto.")
+if not is_esecuzione_valida:
+    st.sidebar.warning("⚡ Scarica ignorata (Dati persistenti)")
 
-with col_table:
-    st.subheader("⚠️ Emergenze")
-    df_em = df_mandria[df_mandria['stato_recinto'] == 'FUORI'] if not df_mandria.empty else pd.DataFrame()
-    st.dataframe(df_em[['nome', 'batteria']] if not df_em.empty else pd.DataFrame(), hide_index=True)
+if not df_mandria.empty and m:
+    # FIX: st.columns richiede il numero di colonne
+    col_map, col_table = st.columns([3, 1])
+    with col_map:
+        st.caption(f"Dati visualizzati alle: **{ora_log}**")
+        st_folium(m, width="100%", height=650, key="mappa_fissa")
 
-st.subheader("📝 Storico Mandria")
-st.dataframe(df_mandria, use_container_width=True, hide_index=True)
+    with col_table:
+        st.subheader("⚠️ Emergenze")
+        df_emergenza = df_mandria[(df_mandria['stato_recinto'] == 'FUORI') | (df_mandria['batteria'] <= 20)]
+        st.dataframe(df_emergenza[['nome', 'batteria']], hide_index=True)
+
+    st.divider()
+    st.subheader("📝 Storico Mandria")
+    st.dataframe(df_mandria, use_container_width=True, hide_index=True)
+else:
+    st.info("Caricamento dati iniziale in corso...")
+
+# Pausa finale per stabilizzare
+time.sleep(2)
