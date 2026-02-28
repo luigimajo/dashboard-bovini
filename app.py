@@ -27,6 +27,7 @@ if (now - st.session_state.last_valid_execution) < 25:
 
 # Se arriviamo qui, il refresh è valido
 st.session_state.last_valid_execution = now
+st.sidebar.warning("⚡ Raffica non intercettata: refresh è valido...")
 
 # --- 3. REFRESH STABILIZZATO ---
 st_autorefresh(interval=30000, key="timer_granitico_30s")
@@ -51,6 +52,7 @@ def load_data():
 df_mandria, saved_coords = load_data()
 
 # --- 5. COSTRUZIONE MAPPA CON SATELLITE GOOGLE ---
+st.sidebar.warning("5. COSTRUZIONE MAPPA CON SATELLITE GOOGLE")
 c_lat, c_lon = 37.9747, 13.5753
 if not df_mandria.empty and 'lat' in df_mandria.columns:
     df_v = df_mandria.dropna(subset=['lat', 'lon'])
@@ -61,6 +63,7 @@ if not df_mandria.empty and 'lat' in df_mandria.columns:
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
 # --- BLOCCO SATELLITE GOOGLE RICHIESTO (ESATTO) ---
+st.sidebar.warning(" BLOCCO SATELLITE GOOGLE RICHIESTO (ESATTO)")
 folium.TileLayer(
     tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
     attr='Google Satellite',
