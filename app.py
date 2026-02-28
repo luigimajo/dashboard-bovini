@@ -15,18 +15,17 @@ st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 # Inizializzazione stati persistenti
 if "edit_mode" not in st.session_state:
     st.session_state.edit_mode = False
-if "temp_coords" not in st.session_state:
-    st.session_state.temp_coords = None
+if "punti_temporanei" not in st.session_state:
+    st.session_state.punti_temporanei = []
 
 # --- 2. LOGICA REFRESH (PULIZIA TOTALE IN EDIT) ---
-# Se siamo in edit_mode, NON eseguiamo st_autorefresh. Il timer nel browser sparisce.
 if not st.session_state.edit_mode:
     st_autorefresh(interval=30000, key="timer_stabile_30s")
 else:
-    st.sidebar.warning("🏗️ MODALITÀ DISEGNO: Refresh Disabilitato")
+    st.sidebar.warning("🏗️ MODALITÀ DISEGNO: Refresh Automatico Disabilitato")
     if st.sidebar.button("🔓 Esci e annulla"):
         st.session_state.edit_mode = False
-        st.session_state.temp_coords = None
+        st.session_state.punti_temporanei = []
         st.rerun()
 
 ora_log = datetime.now().strftime("%H:%M:%S")
@@ -38,7 +37,7 @@ def load_data():
     try:
         df_m = conn.query("SELECT * FROM mandria ORDER BY nome ASC", ttl=0)
         df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
-        coords = json.loads(df_r.iloc[0]['coords']) if not df_r.empty else []
+        coords = json.loads(df_r.iloc['coords']) if not df_r.empty else []
         return df_m, coords
     except:
         return pd.DataFrame(), []
@@ -46,10 +45,8 @@ def load_data():
 df_mandria, saved_coords = load_data()
 
 # --- 4. COSTRUZIONE MAPPA ---
-c_lat, c_lon = 37.9747, 13.5753
-if not df_mandria.empty and 'lat' in df_mandria.columns:
-    df_v = df_mandria.dropna(subset=['lat', 'lon']).query("lat!=0")
-    if not df_v.empty: c_lat, c_lon = df_v['lat'].mean(), df_v['lon'].mean()
+df_valid = df_mandria.dropna(subset=['lat', 'lon']).query("lat!=0")
+c_lat, c_lon = (df_valid['lat'].mean(), df_valid['lon'].mean()) if not df_valid.empty else (37.9747, 13.5753)
 
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
@@ -62,15 +59,27 @@ folium.TileLayer(
     control=False
 ).add_to(m)
 
+# Mostra il vecchio recinto (Giallo)
 if saved_coords:
     folium.Polygon(locations=saved_coords, color="yellow", weight=3, fill=True, fill_opacity=0.2).add_to(m)
 
-# Disegno bovini
+# --- MEMORIA DEL DISEGNO IN CORSO ---
+# Se stiamo disegnando, visualizziamo i punti e la linea che stai creando
+if st.session_state.edit_mode and st.session_state.punti_temporanei:
+    # Disegniamo i vertici cliccati finora (Rossi)
+    for p in st.session_state.punti_temporanei:
+        folium.CircleMarker(location=p, radius=3, color='red', fill=True).add_to(m)
+    # Disegniamo la linea di collegamento (Rossa)
+    if len(st.session_state.punti_temporanei) > 1:
+        folium.PolyLine(locations=st.session_state.punti_temporanei, color="red", weight=2, dash_array='5').add_to(m)
+
+# Mostra bovini
 for _, row in df_mandria.iterrows():
     if pd.notna(row['lat']) and row['lat'] != 0:
         color = 'green' if row['stato_recinto'] == 'DENTRO' else 'red'
         folium.Marker([row['lat'], row['lon']], icon=folium.Icon(color=color, icon='info-sign')).add_to(m)
 
+# Abilitiamo lo strumento di disegno
 Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
 
 # --- 5. LAYOUT ---
@@ -83,37 +92,35 @@ with col_map:
             st.session_state.edit_mode = True
             st.rerun()
     
-    # Render Mappa - USARE KEY STATICA PER NON RESETTARE AL CLIC
+    # Render Mappa - KEY STATICA
     out = st_folium(m, width="100%", height=650, key="main_map")
     
-    # CATTURA IMMEDIATA DEL DISEGNO (Anche se parziale o appena chiuso)
-    if out and out.get('all_drawings') and len(out['all_drawings']) > 0:
-        raw = out['all_drawings'][-1]['geometry']['coordinates'][0]
-        # Salviamo subito nello stato per evitare la sparizione al ricaricamento
-        st.session_state.temp_coords = [[p[1], p[0]] for p in raw]
+    # --- CATTURA DATI IN TEMPO REALE ---
+    if out and out.get('all_drawings'):
+        raw = out['all_drawings'][-1]['geometry']['coordinates']
+        # Il GeoJSON è [[Lon, Lat], [Lon, Lat]], noi convertiamo in [[Lat, Lon]]
+        st.session_state.punti_temporanei = [[p[1], p[0]] for p in raw]
 
     # MOSTRA TASTO SALVA
     if st.session_state.edit_mode:
-        if st.session_state.temp_coords:
-            st.success("📍 Poligono rilevato in memoria!")
+        if st.session_state.punti_temporanei and len(st.session_state.punti_temporanei) > 2:
+            st.success(f"📍 Poligono rilevato ({len(st.session_state.punti_temporanei)} punti)")
             if st.button("💾 CONFERMA E SALVA DEFINITIVAMENTE"):
                 with conn.session as s:
                     s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), 
-                              {"coords": json.dumps(st.session_state.temp_coords)})
+                              {"coords": json.dumps(st.session_state.punti_temporanei)})
                     s.commit()
                 st.session_state.edit_mode = False
-                st.session_state.temp_coords = None
+                st.session_state.punti_temporanei = []
                 st.success("Recinto salvato!")
-                time.sleep(1)
                 st.rerun()
         else:
-            st.info("Disegna sulla mappa e chiudi il poligono (clicca sul primo punto).")
+            st.info("Disegna il poligono sulla mappa. Chiudilo cliccando sul primo punto.")
 
 with col_table:
-    st.subheader("⚠️ Stato")
-    if not df_mandria.empty:
-        df_emergenza = df_mandria[(df_mandria['stato_recinto'] == 'FUORI') | (df_mandria['batteria'] <= 20)]
-        st.dataframe(df_emergenza[['nome', 'batteria']], hide_index=True)
+    st.subheader("⚠️ Emergenze")
+    df_em = df_mandria[(df_mandria['stato_recinto'] == 'FUORI') | (df_mandria.get('batteria', 100) <= 20)]
+    st.dataframe(df_em[['nome', 'batteria']], hide_index=True)
 
 st.subheader("📝 Storico Mandria")
 st.dataframe(df_mandria, use_container_width=True, hide_index=True)
