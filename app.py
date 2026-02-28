@@ -12,38 +12,36 @@ import time
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# --- 2. SEMAFORO ATOMICO (SOLUZIONE FINALE ALLE TRIPLETTE) ---
-@st.cache_resource
-def get_global_state():
-    # Questo oggetto è unico per TUTTI i processi dell'app
-    return {"last_execution_time": 0.0}
+# --- 2. FILTRO ANTI-RAFFICA CLIENT-SIDE ---
+now = time.time()
+if "last_valid_execution" not in st.session_state:
+    st.session_state.last_valid_execution = 0.0
 
-global_state = get_global_state()
-tempo_attuale = time.time()
+# Se il refresh arriva prima di 25 secondi, è una raffica: la ignoriamo e fermiamo tutto
+if (now - st.session_state.last_valid_execution) < 25:
+    # Mostriamo solo un messaggio minimo e fermiamo l'esecuzione pesante
+    st.sidebar.warning("⚡ Raffica intercettata: attesa prossimo ciclo...")
+    # Eseguiamo comunque il timer per non rompere il ciclo
+    st_autorefresh(interval=30000, key="timer_granitico_30s")
+    st.stop() 
 
-# Se un altro refresh (della tripletta) prova a partire meno di 10 secondi dopo, lo uccidiamo
-#if (tempo_attuale - global_state["last_execution_time"]) < 10:
-#    st.stop()
-
-# Se arriviamo qui, l'esecuzione è valida. Aggiorniamo il timestamp globale.
-global_state["last_execution_time"] = tempo_attuale
+# Se arriviamo qui, il refresh è valido
+st.session_state.last_valid_execution = now
 
 # --- 3. REFRESH STABILIZZATO ---
-# Key statica per non resettare mai il timer del browser
-st_autorefresh(interval=30000, key="timer_primario_30s")
+st_autorefresh(interval=30000, key="timer_granitico_30s")
 ora_log = datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
-# --- 4. CONNESSIONE E CARICAMENTO DATI ---
+# --- 4. CARICAMENTO DATI ---
 conn = st.connection("postgresql", type="sql")
 
-@st.cache_data(ttl=2)
+@st.cache_data(ttl=10)
 def load_data():
     try:
         df_m = conn.query("SELECT * FROM mandria ORDER BY nome ASC", ttl=0)
         df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
         coords = []
         if not df_r.empty:
-            # Recupero sicuro del valore JSON delle coordinate
             val = df_r.iloc['coords']
             coords = json.loads(val) if isinstance(val, str) else val
         return df_m, coords
@@ -52,7 +50,7 @@ def load_data():
 
 df_mandria, saved_coords = load_data()
 
-# --- 5. COSTRUZIONE MAPPA CON IL TUO SATELLITE GOOGLE ---
+# --- 5. COSTRUZIONE MAPPA CON SATELLITE GOOGLE ---
 c_lat, c_lon = 37.9747, 13.5753
 if not df_mandria.empty and 'lat' in df_mandria.columns:
     df_v = df_mandria.dropna(subset=['lat', 'lon'])
@@ -101,8 +99,7 @@ if not df_mandria.empty:
     st.subheader("📝 Storico Mandria")
     st.dataframe(df_mandria, use_container_width=True, hide_index=True)
 
-# Pausa finale per stabilizzare il server (2 secondi)
-time.sleep(2)
-# Se un altro refresh (della tripletta) prova a partire meno di 10 secondi dopo, lo uccidiamo
-if (tempo_attuale - global_state["last_execution_time"]) < 10:
-    st.stop()
+# --- 7. RITARDO DI SICUREZZA FINALE ---
+# Questo sleep di 5 secondi garantisce che lo script non finisca troppo in fretta
+# impedendo al browser di sparare nuove richieste immediate.
+time.sleep(5)
