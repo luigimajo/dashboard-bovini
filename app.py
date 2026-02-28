@@ -73,32 +73,42 @@ st.sidebar.write(f"Ultimo Refresh: **{ora_log}**")
 
 col_map, col_table = st.columns([3, 1])
 
+# --- (Parti precedenti invariate: Configurazione, Blocco Refresh, Dati, Mappa) ---
+
 with col_map:
-    # PULSANTE DI SICUREZZA
+    # PULSANTE DI SICUREZZA (Blocca il timer dei 30s)
     if not st.session_state.lock_manuale:
         if st.button("🏗️ INIZIA A DISEGNARE (Blocca Refresh)"):
             st.session_state.lock_manuale = True
             st.rerun()
     
-    # Visualizzazione Mappa
+    # Visualizzazione Mappa (con Satellite Google bloccato nel blocco 'm')
     out = st_folium(m, width="100%", height=650, key="main_map")
     
-    # LOGICA DI SALVATAGGIO (Compare solo se c'è un disegno attivo)
-    if out and out.get('all_drawings') and len(out['all_drawings']) > 0:
-        st.info("📍 Poligonale rilevata. Clicca il tasto sotto per salvare.")
+    # GESTIONE SALVATAGGIO PERSISTENTE
+    if st.session_state.lock_manuale:
+        st.info("💡 Suggerimento: chiudi il poligono cliccando sul primo punto per abilitare il salvataggio.")
         
-        # Recupero e inversione coordinate (Lon/Lat -> Lat/Lon)
-        raw_coords = out['all_drawings'][-1]['geometry']['coordinates'][0]
-        new_poly = [[p[1], p[0]] for p in raw_coords]
-        
-        if st.button("💾 SALVA NUOVO RECINTO"):
-            with conn.session as s:
-                s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), {"coords": json.dumps(new_poly)})
-                s.commit()
-            st.success("Recinto salvato con successo! Riattivazione refresh...")
-            st.session_state.lock_manuale = False
-            time.sleep(1.5)
-            st.rerun()
+        # Il tasto è ora sempre presente durante la fase di modifica
+        if st.button("💾 CONFERMA E SALVA NUOVO RECINTO"):
+            if out and out.get('all_drawings') and len(out['all_drawings']) > 0:
+                # Recupero coordinate GeoJSON [Lon, Lat]
+                raw_coords = out['all_drawings'][-1]['geometry']['coordinates'][0]
+                # Conversione in formato Folium/Database [Lat, Lon]
+                new_poly = [[p[1], p[0]] for p in raw_coords]
+                
+                with conn.session as s:
+                    s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), {"coords": json.dumps(new_poly)})
+                    s.commit()
+                
+                st.success("✅ Recinto salvato! Il monitoraggio ripartirà tra poco.")
+                st.session_state.lock_manuale = False
+                time.sleep(2)
+                st.rerun()
+            else:
+                st.error("⚠️ Nessun poligono rilevato. Assicurati di aver chiuso il disegno sulla mappa.")
+
+# --- (Resto del codice: Tabelle, Storico, Sleep finale) ---
 
 with col_table:
     st.subheader("⚠️ Emergenze")
