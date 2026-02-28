@@ -12,67 +12,49 @@ import time
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# --- 2. FILTRO ANTI-RAFFICA (SESSION STATE) ---
-if "last_exec" not in st.session_state:
-    st.session_state.last_exec = 0.0
+# --- 2. LOGICA REFRESH CON FILTRO DISEGNO ---
+# Controlliamo se nella sessione esiste già un disegno in corso sulla mappa "main_map"
+is_disegnando = False
+if "main_map" in st.session_state and st.session_state["main_map"] is not None:
+    # Se ci sono disegni (all_drawings non vuoto), attiviamo il blocco
+    if st.session_state["main_map"].get("all_drawings"):
+        is_disegnando = True
 
-ora_attuale_unix = time.time()
-# Se la scarica arriva in meno di 10 secondi, usiamo i dati vecchi senza interrogare il DB
-is_raffica = (ora_attuale_unix - st.session_state.last_exec) < 10
+if not is_disegnando:
+    # Il refresh avviene solo se NON stiamo disegnando
+    st_autorefresh(interval=30000, key="datarefresh_stabile")
+else:
+    st.sidebar.warning("⚠️ REFRESH SOSPESO: Disegno in corso...")
 
-if not is_raffica:
-    st.session_state.last_exec = ora_attuale_unix
-
-# Aggiornamento automatico (Timer fisso per stabilità)
-st_autorefresh(interval=30000, key="datarefresh_stabile")
-
-# Timestamp per debug millesimale
+# Timestamp per monitoraggio
 ora_log = datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
 # Connessione a Supabase
 conn = st.connection("postgresql", type="sql")
 
-# --- 3. FUNZIONI CARICAMENTO DATI (CON CACHE PER RAFFICHE) ---
+# --- 3. CARICAMENTO DATI ---
 @st.cache_data(ttl=10)
 def load_data():
     try:
         df_m = conn.query("SELECT * FROM mandria ORDER BY nome ASC", ttl=0)
-        df_g = conn.query("SELECT * FROM gateway ORDER BY ultima_attivita DESC", ttl=0)
         df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
         coords = json.loads(df_r.iloc[0]['coords']) if not df_r.empty else []
-        return df_m, df_g, coords
+        return df_m, coords
     except Exception as e:
-        return pd.DataFrame(), pd.DataFrame(), []
+        return pd.DataFrame(), []
 
-df_mandria, df_gateways, saved_coords = load_data()
+df_mandria, saved_coords = load_data()
 
-# --- 4. SIDEBAR ---
-st.sidebar.header("📡 STATO RETE LORA")
-st.sidebar.write(f"Ultimo Refresh: **{ora_log}**")
-if is_raffica:
-    st.sidebar.warning("⚡ Raffica intercettata (Dati da Cache)")
-
-if not df_gateways.empty:
-    for _, g in df_gateways.iterrows():
-        status_color = "#28a745" if g['stato'] == 'ONLINE' else "#dc3545"
-        icon = "✅" if g['stato'] == 'ONLINE' else "❌"
-        st.sidebar.markdown(f"""
-            <div style="border-left: 5px solid {status_color}; padding: 10px; background-color: rgba(255,255,255,0.05); border-radius: 5px; margin-bottom: 10px;">
-                <b style="font-size: 14px;">{icon} {g['nome']}</b><br>
-                <small>Stato: {g['stato']}</small>
-            </div>
-        """, unsafe_allow_html=True)
-
-# --- 5. LOGICA MAPPA ---
+# --- 4. COSTRUZIONE MAPPA ---
 df_valid = df_mandria.dropna(subset=['lat', 'lon'])
 df_valid = df_valid[(df_valid['lat'] != 0) & (df_valid['lon'] != 0)]
 c_lat, c_lon = (df_valid['lat'].mean(), df_valid['lon'].mean()) if not df_valid.empty else (37.9747, 13.5753)
 
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
-# --- TUO SATELLITE GOOGLE (FISSO E FUNZIONANTE) ---
+# SATELLITE GOOGLE FISSO
 folium.TileLayer(
-    tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+    tiles='https://mt1.google.com{x}&y={y}&z={z}',
     attr='Google Satellite',
     name='Google Satellite',
     overlay=False,
@@ -85,42 +67,40 @@ if saved_coords:
 for _, row in df_mandria.iterrows():
     if pd.notna(row['lat']) and row['lat'] != 0:
         color = 'green' if row['stato_recinto'] == 'DENTRO' else 'red'
-        folium.Marker(
-            [row['lat'], row['lon']],
-            icon=folium.Icon(color=color, icon='info-sign')
-        ).add_to(m)
+        folium.Marker([row['lat'], row['lon']], icon=folium.Icon(color=color, icon='info-sign')).add_to(m)
 
 Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
 
-# --- 6. LAYOUT PRINCIPALE ---
+# --- 5. LAYOUT PRINCIPALE ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
+st.sidebar.write(f"Ultimo Refresh: **{ora_log}**")
+
 col_map, col_table = st.columns([3, 1])
 
 with col_map:
-    # Mostriamo sempre la mappa. Se è una raffica, usa l'istanza precedente.
+    # Usiamo la key "main_map" per permettere al codice in alto di leggere i disegni
     out = st_folium(m, width="100%", height=650, key="main_map")
     
     if out and out.get('all_drawings'):
         raw_coords = out['all_drawings'][-1]['geometry']['coordinates'][0]
         new_poly = [[p[1], p[0]] for p in raw_coords]
+        
         if st.button("💾 Conferma e Salva Nuovo Recinto"):
             with conn.session as s:
                 s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), {"coords": json.dumps(new_poly)})
                 s.commit()
+            st.success("Recinto salvato! Il refresh ripartirà tra poco.")
+            time.sleep(1)
             st.rerun()
 
 with col_table:
-    st.subheader("⚠️ Pannello Emergenze")
-    df_emergenza = df_mandria[(df_mandria['stato_recinto'] == 'FUORI') | (df_mandria['batteria'] <= 20)].copy()
-    if not df_emergenza.empty:
-        st.error(f"Trovate {len(df_emergenza)} criticità!")
-        st.dataframe(df_emergenza[['nome', 'batteria']], hide_index=True)
-    else:
-        st.success("✅ Tutto OK")
+    st.subheader("⚠️ Emergenze")
+    df_emergenza = df_mandria[(df_mandria['stato_recinto'] == 'FUORI') | (df_mandria['batteria'] <= 20)]
+    st.dataframe(df_emergenza[['nome', 'batteria']], hide_index=True)
 
 st.write("---")
 st.subheader("📝 Storico Aggiornamenti")
 st.dataframe(df_mandria, use_container_width=True, hide_index=True)
 
-# 7. SLEEP DI STABILIZZAZIONE
-time.sleep(2)
+# 6. STABILIZZAZIONE FINALE
+time.sleep(1)
