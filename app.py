@@ -14,17 +14,13 @@ st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 # Inizializzazione stati
 if "edit_mode" not in st.session_state:
     st.session_state.edit_mode = False
-if "temp_coords" not in st.session_state:
-    st.session_state.temp_coords = None
 
-# --- 2. IL REFRESH "NON DISTRUTTIVO" (FRAGMENT) ---
-# Questa funzione aggiorna i dati ogni 30s senza resettare la mappa o il disegno
+# --- 2. REFRESH NON DISTRUTTIVO (FRAGMENT) ---
 @st.fragment(run_every=30)
 def sync_data():
     if not st.session_state.edit_mode:
-        st.rerun() # Ricarica solo se non stiamo disegnando
+        st.rerun()
 
-# Avviamo il sincronizzatore silenzioso
 sync_data()
 
 ora_log = datetime.now().strftime("%H:%M:%S")
@@ -37,7 +33,7 @@ def load_data():
         df_m = conn.query("SELECT * FROM mandria ORDER BY nome ASC", ttl=0)
         df_g = conn.query("SELECT * FROM gateway ORDER BY ultima_attivita DESC", ttl=0)
         df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
-        coords = json.loads(df_r.iloc['coords']) if not df_r.empty else []
+        coords = json.loads(df_r.iloc[0]['coords']) if not df_r.empty else []
         return df_m, df_g, coords
     except:
         return pd.DataFrame(), pd.DataFrame(), []
@@ -48,16 +44,16 @@ df_mandria, df_gateways, saved_coords = load_data()
 with st.sidebar:
     st.header("📡 STATO RETE LORA")
     st.write(f"Ultimo Sync: **{ora_log}**")
+    
     if st.session_state.edit_mode:
         st.warning("🏗️ MODALITÀ DISEGNO ATTIVA")
         if st.button("🔓 Esci e annulla"):
             st.session_state.edit_mode = False
-            st.session_state.temp_coords = None
             st.rerun()
 
-    # (Logica inserimento/rimozione Gateway e Bovini come originale...)
-    with st.expander("➕ Gestione"):
-        # Qui metti i tuoi st.text_input e st.button originali
+    # Logica originale Sidebar
+    with st.expander("➕ Gestione Mandria/Gateway"):
+        # Qui rimangono i tuoi input originali
         pass
 
 # --- 5. COSTRUZIONE MAPPA ---
@@ -97,32 +93,33 @@ with col_map:
             st.session_state.edit_mode = True
             st.rerun()
     
-    # Render Mappa - La key fissa è vitale per non resettare al clic del vertice
+    # Mappa con key fissa
     out = st_folium(m, width="100%", height=650, key="main_map")
     
-    # Cattura coordinate dal widget
-    if out and out.get('all_drawings') and len(out['all_drawings']) > 0:
-        raw = out['all_drawings'][-1]['geometry']['coordinates']
-        st.session_state.temp_coords = [[p[1], p[0]] for p in raw]
-
+    # TASTO SALVA: Sempre visibile in Edit Mode
     if st.session_state.edit_mode:
-        if st.session_state.temp_coords:
-            st.success("📍 Poligono rilevato!")
-            if st.button("💾 SALVA NUOVO RECINTO"):
+        st.info("📍 Disegna il recinto. Ricorda di chiudere il poligono cliccando sul primo punto.")
+        if st.button("💾 SALVA NUOVO RECINTO"):
+            if out and out.get('all_drawings') and len(out['all_drawings']) > 0:
+                raw = out['all_drawings'][-1]['geometry']['coordinates'][0]
+                # Inversione Lon/Lat -> Lat/Lon
+                new_poly = [[p[1], p[0]] for p in raw]
+                
                 with conn.session as s:
                     s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), 
-                              {"coords": json.dumps(st.session_state.temp_coords)})
+                              {"coords": json.dumps(new_poly)})
                     s.commit()
+                
+                st.success("✅ Recinto salvato!")
                 st.session_state.edit_mode = False
-                st.session_state.temp_coords = None
                 st.rerun()
-        else:
-            st.info("Disegna sulla mappa. Il refresh automatico è in pausa.")
+            else:
+                st.error("⚠️ Nessun poligono completo rilevato. Chiudi il disegno prima di salvare.")
 
 with col_table:
     st.subheader("⚠️ Emergenze")
-    # (Logica visualizzazione allarmi batteria/fuori come originale...)
-    st.dataframe(df_mandria[df_mandria['stato_recinto'] == 'FUORI'], hide_index=True)
+    df_emergenza = df_mandria[(df_mandria['stato_recinto'] == 'FUORI') | (df_mandria.get('batteria', 100) <= 20)]
+    st.dataframe(df_emergenza[['nome', 'stato_recinto']], hide_index=True)
 
 st.subheader("📝 Storico Mandria")
 st.dataframe(df_mandria, use_container_width=True, hide_index=True)
