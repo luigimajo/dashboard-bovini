@@ -85,6 +85,7 @@ Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':Fa
 # --- 6. LAYOUT ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
 st.sidebar.metric("⏱️ Ora Esecuzione", ora_log)
+st.sidebar.warning("  6. LAYOUT --")
 
 if not df_mandria.empty:
     col_map, col_table = st.columns([3, 1])
@@ -105,4 +106,4 @@ if not df_mandria.empty:
 # --- 7. RITARDO DI SICUREZZA FINALE ---
 # Questo sleep di 5 secondi garantisce che lo script non finisca troppo in fretta
 # impedendo al browser di sparare nuove richieste immediate.
-time.sleep(5)
+time.sleep(15)
