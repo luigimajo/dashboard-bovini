@@ -12,19 +12,19 @@ import time
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# --- 2. LOGICA REFRESH CON FILTRO DISEGNO ---
-# Controlliamo se nella sessione esiste già un disegno in corso sulla mappa "main_map"
-is_disegnando = False
-if "main_map" in st.session_state and st.session_state["main_map"] is not None:
-    # Se ci sono disegni (all_drawings non vuoto), attiviamo il blocco
-    if st.session_state["main_map"].get("all_drawings"):
-        is_disegnando = True
+# Inizializzazione stato blocco refresh
+if "lock_manuale" not in st.session_state:
+    st.session_state.lock_manuale = False
 
-if not is_disegnando:
-    # Il refresh avviene solo se NON stiamo disegnando
+# --- 2. LOGICA REFRESH STABILIZZATA ---
+# Il refresh avviene SOLO se il blocco manuale è False
+if not st.session_state.lock_manuale:
     st_autorefresh(interval=30000, key="datarefresh_stabile")
 else:
-    st.sidebar.warning("⚠️ REFRESH SOSPESO: Disegno in corso...")
+    st.sidebar.warning("⚠️ REFRESH BLOCCATO: Modifica recinto in corso")
+    if st.sidebar.button("🔓 SBLOCCA E ANNULLA"):
+        st.session_state.lock_manuale = False
+        st.rerun()
 
 # Timestamp per monitoraggio
 ora_log = datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -52,7 +52,7 @@ c_lat, c_lon = (df_valid['lat'].mean(), df_valid['lon'].mean()) if not df_valid.
 
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
-# SATELLITE GOOGLE FISSO
+# --- BLOCCO SATELLITE GOOGLE RICHIESTO (ESATTO) ---
 folium.TileLayer(
     tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
     attr='Google Satellite',
@@ -78,18 +78,27 @@ st.sidebar.write(f"Ultimo Refresh: **{ora_log}**")
 col_map, col_table = st.columns([3, 1])
 
 with col_map:
-    # Usiamo la key "main_map" per permettere al codice in alto di leggere i disegni
+    # PULSANTE DI SICUREZZA: Clicca questo prima di iniziare a disegnare
+    if not st.session_state.lock_manuale:
+        if st.button("🏗️ CLICCA QUI PER INIZIARE A DISEGNARE (Blocca Refresh)"):
+            st.session_state.lock_manuale = True
+            st.rerun()
+    
+    # Visualizzazione Mappa
     out = st_folium(m, width="100%", height=650, key="main_map")
     
-    if out and out.get('all_drawings'):
+    # Salvataggio Recinto
+    if out and out.get('all_drawings') and len(out['all_drawings']) > 0:
+        # Prendi l'ultimo disegno
         raw_coords = out['all_drawings'][-1]['geometry']['coordinates'][0]
-        new_poly = [[p[1], p[0]] for p in raw_coords]
+        new_poly = [[p[1], p[0]] for p in raw_coords] # Inversione Lon/Lat -> Lat/Lon
         
-        if st.button("💾 Conferma e Salva Nuovo Recinto"):
+        if st.button("💾 CONFERMA E SALVA NUOVO RECINTO"):
             with conn.session as s:
                 s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), {"coords": json.dumps(new_poly)})
                 s.commit()
-            st.success("Recinto salvato! Il refresh ripartirà tra poco.")
+            st.success("Recinto salvato! Refresh riattivato.")
+            st.session_state.lock_manuale = False
             time.sleep(1)
             st.rerun()
 
@@ -102,5 +111,5 @@ st.write("---")
 st.subheader("📝 Storico Aggiornamenti")
 st.dataframe(df_mandria, use_container_width=True, hide_index=True)
 
-# 6. STABILIZZAZIONE FINALE
+# 6. STABILIZZAZIONE FINALE FINALE
 time.sleep(1)
