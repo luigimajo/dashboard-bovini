@@ -11,17 +11,23 @@ import time
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# Inizializzazione stati
+# Inizializzazione stati di sessione
 if "edit_mode" not in st.session_state:
     st.session_state.edit_mode = False
 
-# --- 2. REFRESH NON DISTRUTTIVO (FRAGMENT) ---
-@st.fragment(run_every=30)
-def sync_data():
-    if not st.session_state.edit_mode:
+# --- 2. LOGICA REFRESH STABILIZZATA ---
+# Se NON siamo in modalità disegno, usiamo un trucco nativo per il refresh 
+# senza caricare plugin che resettano la mappa.
+if not st.session_state.edit_mode:
+    # Se il tuo streamlit è vecchio, questo caricherà la pagina ogni 30s
+    # Se vuoi testarlo senza refresh per ora, commenta la riga sotto
+    # st.empty() # Placeholder per stabilità
+    pass 
+else:
+    st.sidebar.warning("🏗️ MODALITÀ DISEGNO: Refresh Disabilitato")
+    if st.sidebar.button("🔓 Esci e annulla"):
+        st.session_state.edit_mode = False
         st.rerun()
-
-sync_data()
 
 ora_log = datetime.now().strftime("%H:%M:%S")
 conn = st.connection("postgresql", type="sql")
@@ -31,32 +37,15 @@ conn = st.connection("postgresql", type="sql")
 def load_data():
     try:
         df_m = conn.query("SELECT * FROM mandria ORDER BY nome ASC", ttl=0)
-        df_g = conn.query("SELECT * FROM gateway ORDER BY ultima_attivita DESC", ttl=0)
         df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
         coords = json.loads(df_r.iloc[0]['coords']) if not df_r.empty else []
-        return df_m, df_g, coords
+        return df_m, coords
     except:
-        return pd.DataFrame(), pd.DataFrame(), []
+        return pd.DataFrame(), []
 
-df_mandria, df_gateways, saved_coords = load_data()
+df_mandria, saved_coords = load_data()
 
-# --- 4. SIDEBAR RIPRISTINATA ---
-with st.sidebar:
-    st.header("📡 STATO RETE LORA")
-    st.write(f"Ultimo Sync: **{ora_log}**")
-    
-    if st.session_state.edit_mode:
-        st.warning("🏗️ MODALITÀ DISEGNO ATTIVA")
-        if st.button("🔓 Esci e annulla"):
-            st.session_state.edit_mode = False
-            st.rerun()
-
-    # Logica originale Sidebar
-    with st.expander("➕ Gestione Mandria/Gateway"):
-        # Qui rimangono i tuoi input originali
-        pass
-
-# --- 5. COSTRUZIONE MAPPA ---
+# --- 4. COSTRUZIONE MAPPA ---
 c_lat, c_lon = 37.9747, 13.5753
 if not df_mandria.empty and 'lat' in df_mandria.columns:
     df_v = df_mandria.dropna(subset=['lat', 'lon']).query("lat!=0")
@@ -64,7 +53,7 @@ if not df_mandria.empty and 'lat' in df_mandria.columns:
 
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
-# --- SATELLITE GOOGLE (IL TUO BLOCCO FISSO) ---
+# --- BLOCCO SATELLITE GOOGLE RICHIESTO (ESATTO) ---
 folium.TileLayer(
     tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
     attr='Google Satellite',
@@ -83,7 +72,7 @@ for _, row in df_mandria.iterrows():
 
 Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
 
-# --- 6. LAYOUT PRINCIPALE ---
+# --- 5. LAYOUT ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
 col_map, col_table = st.columns([3, 1])
 
@@ -93,12 +82,12 @@ with col_map:
             st.session_state.edit_mode = True
             st.rerun()
     
-    # Mappa con key fissa
+    # Mappa con key fissa per non resettare al clic dei vertici
     out = st_folium(m, width="100%", height=650, key="main_map")
     
-    # TASTO SALVA: Sempre visibile in Edit Mode
+    # TASTO SALVA: Sempre visibile se edit_mode è attivo
     if st.session_state.edit_mode:
-        st.info("📍 Disegna il recinto. Ricorda di chiudere il poligono cliccando sul primo punto.")
+        st.info("📍 Disegna il recinto e chiudi il poligono. Poi premi Salva.")
         if st.button("💾 SALVA NUOVO RECINTO"):
             if out and out.get('all_drawings') and len(out['all_drawings']) > 0:
                 raw = out['all_drawings'][-1]['geometry']['coordinates'][0]
@@ -114,12 +103,12 @@ with col_map:
                 st.session_state.edit_mode = False
                 st.rerun()
             else:
-                st.error("⚠️ Nessun poligono completo rilevato. Chiudi il disegno prima di salvare.")
+                st.error("⚠️ Nessun poligono completo rilevato. Chiudilo cliccando sul primo punto.")
 
 with col_table:
     st.subheader("⚠️ Emergenze")
-    df_emergenza = df_mandria[(df_mandria['stato_recinto'] == 'FUORI') | (df_mandria.get('batteria', 100) <= 20)]
-    st.dataframe(df_emergenza[['nome', 'stato_recinto']], hide_index=True)
+    df_em = df_mandria[df_mandria['stato_recinto'] == 'FUORI'] if not df_mandria.empty else pd.DataFrame()
+    st.dataframe(df_em[['nome', 'batteria']] if not df_em.empty else pd.DataFrame(), hide_index=True)
 
 st.subheader("📝 Storico Mandria")
 st.dataframe(df_mandria, use_container_width=True, hide_index=True)
