@@ -11,24 +11,23 @@ from datetime import datetime
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# Inizializzazione stati di sessione
+# --- 1b. SESSION STATE ---
 if "edit_mode" not in st.session_state:
     st.session_state.edit_mode = False
 if "temp_coords" not in st.session_state:
     st.session_state.temp_coords = None
 
 # --- 2. REFRESH ROBUSTO: DISARMA TIMER IN EDIT MODE ---
-# NOTE: anche se in edit non chiami autorefresh, il timer JS già creato può scattare.
-# Soluzione: montare un autorefresh "diverso" (key diversa) con interval=0 per smontare quello vecchio.
+# (due key diverse: in edit interval=0 "smonta" il timer precedente)
 if st.session_state.edit_mode:
-    st_autorefresh(interval=0, key="timer_edit_disabled")  # disarma
+    st_autorefresh(interval=0, key="timer_edit_disabled")
     st.sidebar.warning("🏗️ MODALITÀ DISEGNO: Refresh Disabilitato")
     if st.sidebar.button("🔓 Esci e annulla"):
         st.session_state.edit_mode = False
         st.session_state.temp_coords = None
         st.rerun()
 else:
-    st_autorefresh(interval=30000, key="timer_view_30s")  # attivo solo in view mode
+    st_autorefresh(interval=30000, key="timer_view_30s")
 
 ora_log = datetime.now().strftime("%H:%M:%S.%f")[:-3]
 conn = st.connection("postgresql", type="sql")
@@ -40,6 +39,7 @@ def load_data():
         df_m = conn.query("SELECT * FROM mandria ORDER BY nome ASC", ttl=0)
         df_g = conn.query("SELECT * FROM gateway ORDER BY ultima_attivita DESC", ttl=0)
         df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
+
         coords = []
         if not df_r.empty:
             val = df_r.iloc[0]["coords"]
@@ -120,7 +120,7 @@ if not df_mandria.empty and "lat" in df_mandria.columns and "lon" in df_mandria.
 
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
-# --- BLOCCO SATELLITE GOOGLE ---
+# Satellite Google
 folium.TileLayer(
     tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
     attr="Google Satellite",
@@ -129,13 +129,13 @@ folium.TileLayer(
     control=False,
 ).add_to(m)
 
-# Draw plugin (stabile)
+# Draw plugin
 Draw(
     draw_options={"polyline": False, "rectangle": False, "circle": False, "marker": False, "polygon": True},
     edit_options={"edit": False, "remove": False},
 ).add_to(m)
 
-# Overlay (recinto + marker) in FeatureGroup aggiornabile
+# Overlay aggiornabile (recinto + marker)
 fg = folium.FeatureGroup(name="overlay", overlay=True, control=False)
 
 if saved_coords:
@@ -166,27 +166,43 @@ with col_map:
             st.session_state.temp_coords = None
             st.rerun()
 
+    # IMPORTANTE: niente returned_objects per compatibilità massima
     out = st_folium(
         m,
         center=[c_lat, c_lon],
         zoom=18,
-        feature_group_to_add=fg,              # aggiorna overlay senza rimontare
-        returned_objects=["all_drawings"],    # meno payload
+        feature_group_to_add=fg,
         use_container_width=True,
         height=650,
         key="main_map",
     )
 
-    # Salva in sessione l'ultimo disegno CHIUSO
-    if out and out.get("all_drawings") and len(out["all_drawings"]) > 0:
-        raw = out["all_drawings"][-1]["geometry"]["coordinates"]
-        # GeoJSON: [lon, lat] -> convertiamo in [lat, lon]
-        if isinstance(raw[0][0], list):  # Polygon => [[[lon,lat],...]]
+    # --- Estrazione robusta disegno (all_drawings + last_active_drawing fallback) ---
+    drawing = None
+    if out:
+        if out.get("all_drawings") and len(out["all_drawings"]) > 0:
+            drawing = out["all_drawings"][-1]
+        elif out.get("last_active_drawing"):
+            drawing = out["last_active_drawing"]
+
+    if drawing and drawing.get("geometry") and drawing["geometry"].get("coordinates"):
+        raw = drawing["geometry"]["coordinates"]
+
+        # Polygon GeoJSON: [[[lon,lat],...]]
+        if (
+            isinstance(raw, list)
+            and len(raw) > 0
+            and isinstance(raw[0], list)
+            and len(raw[0]) > 0
+            and isinstance(raw[0][0], list)
+        ):
             st.session_state.temp_coords = [[p[1], p[0]] for p in raw[0]]
-        else:
+        elif isinstance(raw, list):
+            # fallback generico
             st.session_state.temp_coords = [[p[1], p[0]] for p in raw]
 
-    if st.session_state.edit_mode:
+    # --- UI SALVATAGGIO (mostra se in edit_mode O se temp_coords già presenti) ---
+    if st.session_state.edit_mode or st.session_state.temp_coords:
         if st.session_state.temp_coords:
             st.success("📍 Poligono pronto!")
             if st.button("💾 SALVA NUOVO RECINTO"):
@@ -200,6 +216,7 @@ with col_map:
                         {"coords": json.dumps(st.session_state.temp_coords)},
                     )
                     s.commit()
+
                 st.session_state.edit_mode = False
                 st.session_state.temp_coords = None
                 st.rerun()
@@ -209,10 +226,11 @@ with col_map:
 with col_table:
     st.subheader("⚠️ Pannello Emergenze")
 
-    # Nota: df_mandria.get('batteria', 100) se colonna non esiste non va bene perché .get su DataFrame
-    # Manteniamo la tua logica, ma in modo robusto:
+    # Gestione robusta batteria (se colonna non esiste)
     if "batteria" in df_mandria.columns:
-        df_emergenza = df_mandria[(df_mandria["stato_recinto"] == "FUORI") | (df_mandria["batteria"] <= 20)].copy()
+        df_emergenza = df_mandria[
+            (df_mandria["stato_recinto"] == "FUORI") | (df_mandria["batteria"] <= 20)
+        ].copy()
     else:
         df_emergenza = df_mandria[(df_mandria["stato_recinto"] == "FUORI")].copy()
 
@@ -221,8 +239,10 @@ with col_table:
             avv = []
             if row.get("stato_recinto") == "FUORI":
                 avv.append("🚨 FUORI")
-            if "batteria" in row and pd.notna(row.get("batteria")) and row.get("batteria") <= 20:
-                avv.append("🪫 BATTERIA")
+            if "batteria" in df_emergenza.columns:
+                b = row.get("batteria")
+                if pd.notna(b) and b <= 20:
+                    avv.append("🪫 BATTERIA")
             return " + ".join(avv)
 
         df_emergenza["PROBLEMA"] = df_emergenza.apply(genera_avvisi, axis=1)
@@ -231,6 +251,7 @@ with col_table:
         cols = ["nome", "PROBLEMA"]
         if "batteria" in df_emergenza.columns:
             cols.append("batteria")
+
         st.dataframe(df_emergenza[cols], hide_index=True)
     else:
         st.success("✅ Tutto Sotto Controllo")
