@@ -1,5 +1,6 @@
 import streamlit as st
 import folium
+import streamlit_folium
 from streamlit_folium import st_folium
 from folium.plugins import Draw
 import json
@@ -12,6 +13,14 @@ import time
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
+# --- Debug versioni (FONDAMENTALE SU STREAMLIT CLOUD) ---
+with st.sidebar:
+    st.caption("🔧 Versioni runtime")
+    st.write("streamlit:", st.__version__)
+    st.write("streamlit-folium:", getattr(streamlit_folium, "__version__", "unknown"))
+    st.write("folium:", getattr(folium, "__version__", "unknown"))
+
+# Session state
 if "edit_mode" not in st.session_state:
     st.session_state.edit_mode = False
 if "temp_coords" not in st.session_state:
@@ -21,6 +30,7 @@ if "temp_coords" not in st.session_state:
 if not st.session_state.edit_mode:
     st_autorefresh(interval=30000, key="timer_primario_30s")
 else:
+    # disarmo hard del timer nel browser
     st_autorefresh(interval=0, key="timer_edit_disabled")
     st.sidebar.warning("🏗️ MODALITÀ DISEGNO: Refresh Disabilitato")
     if st.sidebar.button("🔓 Esci e annulla"):
@@ -48,7 +58,7 @@ def load_data():
 
 df_mandria, df_gateways, saved_coords = load_data()
 
-# --- 4. SIDEBAR (la tua) ---
+# --- 4. SIDEBAR ---
 with st.sidebar:
     st.header("📡 STATO RETE LORA")
     st.write(f"Ultimo Refresh: **{ora_log}**")
@@ -67,26 +77,35 @@ with st.sidebar:
                 unsafe_allow_html=True,
             )
 
-# --- 5. CENTRO MAPPA ---
+# --- 5. MAPPA ---
 c_lat, c_lon = 37.9747, 13.5753
 if not df_mandria.empty and "lat" in df_mandria.columns and "lon" in df_mandria.columns:
     df_v = df_mandria.dropna(subset=["lat", "lon"]).query("lat != 0 and lon != 0")
     if not df_v.empty:
         c_lat, c_lon = df_v["lat"].mean(), df_v["lon"].mean()
 
-def base_map(lat, lon):
-    m = folium.Map(location=[lat, lon], zoom_start=18, tiles=None)
-    folium.TileLayer(
-        tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
-        attr="Google Satellite",
-        name="Google Satellite",
-        overlay=False,
-        control=False,
-    ).add_to(m)
-    Draw(draw_options={"polyline": False, "rectangle": False, "circle": False, "marker": False, "polygon": True}).add_to(m)
-    return m
+m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
-# --- 6. LAYOUT PRINCIPALE ---
+# ✅ Tile URL corretto
+folium.TileLayer(
+    tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+    attr="Google Satellite",
+    name="Google Satellite",
+    overlay=False,
+    control=False,
+).add_to(m)
+
+if saved_coords:
+    folium.Polygon(locations=saved_coords, color="yellow", weight=3, fill=True, fill_opacity=0.2).add_to(m)
+
+for _, row in df_mandria.iterrows():
+    if pd.notna(row.get("lat")) and row["lat"] != 0:
+        color = "green" if row.get("stato_recinto") == "DENTRO" else "red"
+        folium.Marker([row["lat"], row["lon"]], icon=folium.Icon(color=color, icon="info-sign")).add_to(m)
+
+Draw(draw_options={"polyline": False, "rectangle": False, "circle": False, "marker": False, "polygon": True}).add_to(m)
+
+# --- 6. LAYOUT ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
 col_map, col_table = st.columns([3, 1])
 
@@ -97,44 +116,21 @@ with col_map:
             st.session_state.temp_coords = None
             st.rerun()
 
-    # In VIEW: mappa completa (poligono salvato + marker)
-    if not st.session_state.edit_mode:
-        m = base_map(c_lat, c_lon)
+    out = st_folium(
+        m,
+        use_container_width=True,
+        height=650,
+        key="main_map",
+        returned_objects=["all_drawings", "last_active_drawing", "selected_layers", "bounds", "zoom"],
+    )
 
-        if saved_coords:
-            folium.Polygon(locations=saved_coords, color="yellow", weight=3, fill=True, fill_opacity=0.2).add_to(m)
-
-        for _, row in df_mandria.iterrows():
-            if pd.notna(row.get("lat")) and row["lat"] != 0:
-                color = "green" if row.get("stato_recinto") == "DENTRO" else "red"
-                folium.Marker([row["lat"], row["lon"]], icon=folium.Icon(color=color, icon="info-sign")).add_to(m)
-
-        out = st_folium(
-            m,
-            use_container_width=True,
-            height=650,
-            key="main_map_view",
-            returned_objects=["all_drawings", "last_active_drawing"],
-        )
-
-    # In EDIT: mappa “pulita” SOLO draw (riduce bug/interferenze)
-    else:
-        m = base_map(c_lat, c_lon)
-
-        out = st_folium(
-            m,
-            use_container_width=True,
-            height=650,
-            key="main_map_edit",  # key diversa = stato separato
-            returned_objects=["all_drawings", "last_active_drawing"],
-        )
-
-    # --- DEBUG TEST ---
+    # DEBUG: mostra cosa arriva davvero
     with st.expander("🧪 DEBUG st_folium (draw)"):
         st.write("all_drawings:", None if not out else out.get("all_drawings"))
         st.write("last_active_drawing:", None if not out else out.get("last_active_drawing"))
+        st.write("selected_layers:", None if not out else out.get("selected_layers"))
 
-    # --- CATTURA COORDINATE ---
+    # Estrazione disegno (all_drawings -> last_active_drawing)
     drawing = None
     if out:
         if out.get("all_drawings") and isinstance(out["all_drawings"], list) and len(out["all_drawings"]) > 0:
@@ -150,7 +146,7 @@ with col_map:
                 ring = coords[0]
                 st.session_state.temp_coords = [[p[1], p[0]] for p in ring if isinstance(p, list) and len(p) >= 2]
 
-    # --- PULSANTE SALVA (IDENTICO) ---
+    # Pulsante SALVA (identico)
     if st.session_state.edit_mode:
         if st.session_state.temp_coords:
             st.success(f"📍 Poligono rilevato ({len(st.session_state.temp_coords)} punti).")
@@ -175,6 +171,7 @@ with col_map:
 
 with col_table:
     st.subheader("⚠️ Stato")
+
     if not df_mandria.empty:
         if "batteria" in df_mandria.columns:
             df_emergenza = df_mandria[(df_mandria["stato_recinto"] == "FUORI") | (df_mandria["batteria"] <= 20)]
@@ -182,6 +179,8 @@ with col_table:
         else:
             df_emergenza = df_mandria[(df_mandria["stato_recinto"] == "FUORI")]
             st.dataframe(df_emergenza[["nome"]], hide_index=True)
+    else:
+        st.info("Nessun dato mandria disponibile.")
 
 st.divider()
 st.subheader("📝 Storico Mandria")
