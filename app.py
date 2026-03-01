@@ -11,7 +11,7 @@ from datetime import datetime
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# Inizializzazione stati di sessione
+# --- SESSION STATE ---
 if "edit_mode" not in st.session_state:
     st.session_state.edit_mode = False
 if "temp_coords" not in st.session_state:
@@ -19,9 +19,12 @@ if "temp_coords" not in st.session_state:
 if "refresh_enabled" not in st.session_state:
     st.session_state.refresh_enabled = True
 
+# EXTRA: chiave “stabile” durante il disegno, cambia solo quando inizi un NUOVO recinto
+if "draw_session_id" not in st.session_state:
+    st.session_state.draw_session_id = 0
+
 # --- 2. LOGICA REFRESH (BLOCCO DISEGNO) ---
 if st.session_state.refresh_enabled:
-    # Key statica per stabilità totale contro le triplette
     st_autorefresh(interval=30000, key="timer_primario_30s")
 else:
     st.sidebar.warning("🏗️ MODALITÀ DISEGNO: Refresh Disabilitato")
@@ -113,18 +116,14 @@ with st.sidebar:
 
 # --- 5. COSTRUZIONE MAPPA ---
 c_lat, c_lon = 37.9747, 13.5753
-if (
-    not df_mandria.empty
-    and "lat" in df_mandria.columns
-    and "lon" in df_mandria.columns
-):
+if not df_mandria.empty and "lat" in df_mandria.columns and "lon" in df_mandria.columns:
     df_v = df_mandria.dropna(subset=["lat", "lon"]).query("lat != 0 and lon != 0")
     if not df_v.empty:
         c_lat, c_lon = df_v["lat"].mean(), df_v["lon"].mean()
 
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
-# --- BLOCCO SATELLITE GOOGLE RICHIESTO (FISSO) ---
+# --- BLOCCO SATELLITE GOOGLE ---
 folium.TileLayer(
     tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
     attr="Google Satellite",
@@ -133,6 +132,7 @@ folium.TileLayer(
     control=False,
 ).add_to(m)
 
+# Recinto salvato
 if saved_coords:
     folium.Polygon(
         locations=saved_coords,
@@ -142,6 +142,18 @@ if saved_coords:
         fill_opacity=0.2,
     ).add_to(m)
 
+# EXTRA: Recinto temporaneo (bozza) durante edit mode
+# (serve a “ridisegnarlo” dopo qualsiasi rerun)
+if st.session_state.edit_mode and st.session_state.temp_coords:
+    folium.Polygon(
+        locations=st.session_state.temp_coords,
+        color="cyan",
+        weight=3,
+        fill=True,
+        fill_opacity=0.15,
+    ).add_to(m)
+
+# Marker bovini
 for _, row in df_mandria.iterrows():
     if pd.notna(row.get("lat")) and row.get("lat") != 0:
         color = "green" if row.get("stato_recinto") == "DENTRO" else "red"
@@ -170,10 +182,17 @@ with col_map:
             st.session_state.edit_mode = True
             st.session_state.refresh_enabled = False
             st.session_state.temp_coords = None
+
+            # EXTRA: forza una nuova istanza della mappa SOLO quando inizi un nuovo recinto
+            st.session_state.draw_session_id += 1
             st.rerun()
 
-    out = st_folium(m, width="100%", height=650, key="main_map")
+    # EXTRA: key stabile durante il disegno (non cambia ad ogni rerun)
+    map_key = f"main_map_{st.session_state.draw_session_id}"
 
+    out = st_folium(m, width="100%", height=650, key=map_key)
+
+    # Aggiorna temp_coords se l'utente ha almeno chiuso un poligono
     if out and out.get("all_drawings") and len(out["all_drawings"]) > 0:
         raw = out["all_drawings"][-1]["geometry"]["coordinates"]
         st.session_state.temp_coords = (
@@ -211,7 +230,6 @@ with col_table:
     ].copy()
 
     if not df_emergenza.empty:
-
         def genera_avvisi(row):
             avv = []
             if row.get("stato_recinto") == "FUORI":
