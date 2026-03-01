@@ -12,21 +12,22 @@ import time
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# Inizializzazione stati persistenti
+# Inizializzazione stati di sessione
 if "edit_mode" not in st.session_state:
     st.session_state.edit_mode = False
-if "punti_temporanei" not in st.session_state:
-    st.session_state.punti_temporanei = []
 
 # --- 2. LOGICA REFRESH (PULIZIA TOTALE IN EDIT) ---
-if not st.session_state.edit_mode:
-    st_autorefresh(interval=30000, key="timer_stabile_30s")
-else:
-    st.sidebar.warning("🏗️ MODALITÀ DISEGNO: Refresh Automatico Disabilitato")
-    if st.sidebar.button("🔓 Esci e annulla"):
-        st.session_state.edit_mode = False
-        st.session_state.punti_temporanei = []
-        st.rerun()
+# Usiamo un segnaposto: se siamo in edit_mode, st_autorefresh sparisce dal codice
+refresh_placeholder = st.empty()
+with refresh_placeholder:
+    if not st.session_state.edit_mode:
+        # Key statica per non creare duplicati
+        st_autorefresh(interval=30000, key="timer_stabile_30s")
+    else:
+        st.sidebar.warning("🏗️ REFRESH DISABILITATO (Modalità Disegno)")
+        if st.sidebar.button("🔓 Sblocca e Annulla"):
+            st.session_state.edit_mode = False
+            st.rerun()
 
 ora_log = datetime.now().strftime("%H:%M:%S")
 conn = st.connection("postgresql", type="sql")
@@ -59,67 +60,55 @@ folium.TileLayer(
     control=False
 ).add_to(m)
 
-# Mostra il vecchio recinto (Giallo)
 if saved_coords:
     folium.Polygon(locations=saved_coords, color="yellow", weight=3, fill=True, fill_opacity=0.2).add_to(m)
 
-# --- MEMORIA DEL DISEGNO IN CORSO ---
-# Se stiamo disegnando, visualizziamo i punti e la linea che stai creando
-if st.session_state.edit_mode and st.session_state.punti_temporanei:
-    # Disegniamo i vertici cliccati finora (Rossi)
-    for p in st.session_state.punti_temporanei:
-        folium.CircleMarker(location=p, radius=3, color='red', fill=True).add_to(m)
-    # Disegniamo la linea di collegamento (Rossa)
-    if len(st.session_state.punti_temporanei) > 1:
-        folium.PolyLine(locations=st.session_state.punti_temporanei, color="red", weight=2, dash_array='5').add_to(m)
-
-# Mostra bovini
+# Marker animali
 for _, row in df_mandria.iterrows():
     if pd.notna(row['lat']) and row['lat'] != 0:
         color = 'green' if row['stato_recinto'] == 'DENTRO' else 'red'
         folium.Marker([row['lat'], row['lon']], icon=folium.Icon(color=color, icon='info-sign')).add_to(m)
 
-# Abilitiamo lo strumento di disegno
 Draw(draw_options={'polyline':False,'rectangle':False,'circle':False,'marker':False,'polygon':True}).add_to(m)
 
 # --- 5. LAYOUT ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
-col_map, col_table = st.columns([3, 1])
+col_map, col_table = st.columns()
 
 with col_map:
+    # Tasto per entrare in modalità disegno
     if not st.session_state.edit_mode:
         if st.button("🏗️ INIZIA DISEGNO NUOVO RECINTO"):
             st.session_state.edit_mode = True
             st.rerun()
     
-    # Render Mappa - KEY STATICA
-    out = st_folium(m, width="100%", height=650, key="main_map")
+    # Render Mappa - KEY FISSA PER NON RESETTARE AL CLIC DEI VERTICI
+    out = st_folium(m, width="100%", height=650, key="mappa_fissa")
     
-    # --- CATTURA DATI IN TEMPO REALE ---
-    if out and out.get('all_drawings'):
-        raw = out['all_drawings'][-1]['geometry']['coordinates']
-        # Il GeoJSON è [[Lon, Lat], [Lon, Lat]], noi convertiamo in [[Lat, Lon]]
-        st.session_state.punti_temporanei = [[p[1], p[0]] for p in raw]
-
-    # MOSTRA TASTO SALVA
+    # Logica di salvataggio (Sempre visibile in Edit Mode)
     if st.session_state.edit_mode:
-        if st.session_state.punti_temporanei and len(st.session_state.punti_temporanei) > 2:
-            st.success(f"📍 Poligono rilevato ({len(st.session_state.punti_temporanei)} punti)")
-            if st.button("💾 CONFERMA E SALVA DEFINITIVAMENTE"):
+        st.info("📍 Disegna il poligono. Quando hai chiuso la forma, clicca il tasto sotto.")
+        if st.button("💾 SALVA NUOVO RECINTO"):
+            if out and out.get('all_drawings') and len(out['all_drawings']) > 0:
+                raw = out['all_drawings'][-1]['geometry']['coordinates']
+                # Inversione coordinate Lon/Lat -> Lat/Lon
+                new_poly = [[p, p] for p in raw]
+                
                 with conn.session as s:
                     s.execute(text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"), 
-                              {"coords": json.dumps(st.session_state.punti_temporanei)})
+                              {"coords": json.dumps(new_poly)})
                     s.commit()
+                
+                st.success("✅ Salvato! Riattivazione monitoraggio...")
                 st.session_state.edit_mode = False
-                st.session_state.punti_temporanei = []
-                st.success("Recinto salvato!")
+                time.sleep(1)
                 st.rerun()
-        else:
-            st.info("Disegna il poligono sulla mappa. Chiudilo cliccando sul primo punto.")
+            else:
+                st.error("⚠️ Nessun poligono chiuso rilevato. Finisci il disegno prima di salvare.")
 
 with col_table:
-    st.subheader("⚠️ Emergenze")
-    df_em = df_mandria[(df_mandria['stato_recinto'] == 'FUORI') | (df_mandria.get('batteria', 100) <= 20)]
+    st.subheader("⚠️ Stato")
+    df_em = df_mandria[df_mandria['stato_recinto'] == 'FUORI'] if not df_mandria.empty else pd.DataFrame()
     st.dataframe(df_em[['nome', 'batteria']], hide_index=True)
 
 st.subheader("📝 Storico Mandria")
