@@ -19,6 +19,7 @@ if "temp_coords" not in st.session_state:
 
 # --- 2. REFRESH ROBUSTO: DISARMA TIMER IN EDIT MODE ---
 if st.session_state.edit_mode:
+    # Disarma hard il timer già "armato" nel browser
     st_autorefresh(interval=0, key="timer_edit_disabled")
     st.sidebar.warning("🏗️ MODALITÀ DISEGNO: Refresh Disabilitato")
     if st.sidebar.button("🔓 Esci e annulla"):
@@ -110,105 +111,96 @@ with st.sidebar:
                     s.commit()
                 st.rerun()
 
-# --- Helper: estrazione universale poligono da qualsiasi struttura out ---
-def find_latest_polygon_coords(obj):
-    """
-    Cerca ricorsivamente dentro 'obj' (dict/list) una Feature GeoJSON Polygon e restituisce:
-    - coords in formato [[lat, lon], ...] (anello esterno)
-    Se non trova niente, ritorna None.
-    """
-    def is_polygon_feature(d):
-        try:
-            if not isinstance(d, dict):
-                return False
-            # Feature GeoJSON classica
-            if d.get("type") == "Feature" and isinstance(d.get("geometry"), dict):
-                g = d["geometry"]
-                return g.get("type") == "Polygon" and isinstance(g.get("coordinates"), list)
-            # Alcune varianti: dict con chiave geometry direttamente
-            if isinstance(d.get("geometry"), dict):
-                g = d["geometry"]
-                return g.get("type") == "Polygon" and isinstance(g.get("coordinates"), list)
-            return False
-        except Exception:
-            return False
-
-    def extract_latlon_from_polygon_coords(coords):
-        # coords: [ [ [lon,lat], [lon,lat], ... ] , ... ]  (ring esterno = coords[0])
-        if not (isinstance(coords, list) and len(coords) > 0 and isinstance(coords[0], list) and len(coords[0]) > 0):
-            return None
-        ring = coords[0]
-        out_latlon = []
-        for p in ring:
-            if isinstance(p, (list, tuple)) and len(p) >= 2:
-                lon, lat = p[0], p[1]
-                out_latlon.append([lat, lon])
-        return out_latlon if len(out_latlon) >= 3 else None
-
-    # DFS ricorsivo: ritorna l'ultima Polygon trovata (se ce ne sono più)
-    found = None
-
-    def walk(x):
-        nonlocal found
-        if isinstance(x, dict):
-            if is_polygon_feature(x):
-                g = x.get("geometry", x)
-                coords = g.get("coordinates")
-                latlon = extract_latlon_from_polygon_coords(coords)
-                if latlon:
-                    found = latlon
-            for v in x.values():
-                walk(v)
-        elif isinstance(x, list):
-            for it in x:
-                walk(it)
-
-    walk(obj)
-    return found
-
-# --- 5. COSTRUZIONE MAPPA ---
+# --- 5. CENTRO MAPPA ---
 c_lat, c_lon = 37.9747, 13.5753
 if not df_mandria.empty and "lat" in df_mandria.columns and "lon" in df_mandria.columns:
     df_v = df_mandria.dropna(subset=["lat", "lon"]).query("lat != 0 and lon != 0")
     if not df_v.empty:
         c_lat, c_lon = df_v["lat"].mean(), df_v["lon"].mean()
 
-m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
+# --- 6. FUNZIONI MAPPA ---
+def build_base_map(center_lat, center_lon):
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=18, tiles=None)
+    folium.TileLayer(
+        tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+        attr="Google Satellite",
+        name="Google Satellite",
+        overlay=False,
+        control=False,
+    ).add_to(m)
+    return m
 
-folium.TileLayer(
-    tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
-    attr="Google Satellite",
-    name="Google Satellite",
-    overlay=False,
-    control=False,
-).add_to(m)
+def add_draw(m):
+    Draw(
+        draw_options={"polyline": False, "rectangle": False, "circle": False, "marker": False, "polygon": True},
+        edit_options={"edit": False, "remove": False},
+    ).add_to(m)
 
-Draw(
-    draw_options={"polyline": False, "rectangle": False, "circle": False, "marker": False, "polygon": True},
-    edit_options={"edit": False, "remove": False},
-).add_to(m)
+def build_overlay_feature_group(saved_coords, df_mandria):
+    fg = folium.FeatureGroup(name="overlay", overlay=True, control=False)
 
-# Overlay (recinto salvato + marker)
-fg = folium.FeatureGroup(name="overlay", overlay=True, control=False)
-
-if saved_coords:
-    folium.Polygon(
-        locations=saved_coords,
-        color="yellow",
-        weight=3,
-        fill=True,
-        fill_opacity=0.2,
-    ).add_to(fg)
-
-for _, row in df_mandria.iterrows():
-    if pd.notna(row.get("lat")) and row["lat"] != 0:
-        color = "green" if row.get("stato_recinto") == "DENTRO" else "red"
-        folium.Marker(
-            [row["lat"], row["lon"]],
-            icon=folium.Icon(color=color, icon="info-sign"),
+    if saved_coords:
+        folium.Polygon(
+            locations=saved_coords,
+            color="yellow",
+            weight=3,
+            fill=True,
+            fill_opacity=0.2,
         ).add_to(fg)
 
-# --- 6. LAYOUT PRINCIPALE ---
+    for _, row in df_mandria.iterrows():
+        if pd.notna(row.get("lat")) and row["lat"] != 0:
+            color = "green" if row.get("stato_recinto") == "DENTRO" else "red"
+            folium.Marker(
+                [row["lat"], row["lon"]],
+                icon=folium.Icon(color=color, icon="info-sign"),
+            ).add_to(fg)
+
+    return fg
+
+def extract_polygon_from_out(out_dict):
+    """
+    Estrae l'ultimo poligono chiuso da out['all_drawings'] o out['last_active_drawing'].
+    Ritorna coords in formato [[lat, lon], ...] oppure None.
+    """
+    if not out_dict or not isinstance(out_dict, dict):
+        return None
+
+    drawing = None
+    if out_dict.get("all_drawings"):
+        try:
+            if len(out_dict["all_drawings"]) > 0:
+                drawing = out_dict["all_drawings"][-1]
+        except Exception:
+            drawing = None
+    if drawing is None and out_dict.get("last_active_drawing"):
+        drawing = out_dict["last_active_drawing"]
+
+    if not drawing or not isinstance(drawing, dict):
+        return None
+
+    geom = drawing.get("geometry") if isinstance(drawing.get("geometry"), dict) else None
+    if not geom:
+        return None
+
+    if geom.get("type") != "Polygon":
+        return None
+
+    raw = geom.get("coordinates")
+    # GeoJSON Polygon: [ [ [lon,lat], ... ] , ... ] -> prendiamo anello esterno [0]
+    if not (isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], list)):
+        return None
+
+    ring = raw[0]
+    coords = []
+    for p in ring:
+        if isinstance(p, (list, tuple)) and len(p) >= 2:
+            lon, lat = p[0], p[1]
+            coords.append([lat, lon])
+
+    return coords if len(coords) >= 3 else None
+
+# --- 7. LAYOUT PRINCIPALE ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
 col_map, col_table = st.columns([3, 1])
 
@@ -219,32 +211,51 @@ with col_map:
             st.session_state.temp_coords = None
             st.rerun()
 
-    out = st_folium(
-        m,
-        center=[c_lat, c_lon],
-        zoom=18,
-        feature_group_to_add=fg,
-        use_container_width=True,
-        height=650,
-        key="main_map",
-    )
+    # --- VIEW MODE: dynamic update (ok per marker/recinto) ---
+    if not st.session_state.edit_mode:
+        m = build_base_map(c_lat, c_lon)
+        add_draw(m)  # lo lasciamo anche in view, non dà fastidio
+        fg = build_overlay_feature_group(saved_coords, df_mandria)
 
-    # --- Estrazione universale Polygon da out (compatibile con versioni diverse) ---
-    if out:
-        coords = find_latest_polygon_coords(out)
-        if coords:
-            st.session_state.temp_coords = coords
+        out = st_folium(
+            m,
+            center=[c_lat, c_lon],
+            zoom=18,
+            feature_group_to_add=fg,
+            use_container_width=True,
+            height=650,
+            key="main_map_view",
+        )
 
-    # (DEBUG opzionale: se vuoi vedere cosa arriva davvero, lascia questo expander)
-    with st.expander("🔎 Debug disegno (se serve)"):
-        if out is None:
-            st.write("out = None")
-        else:
-            st.write("Chiavi out:", list(out.keys()) if isinstance(out, dict) else type(out))
-            # Attenzione: non stampare tutto se enorme
-            st.write(out)
+    # --- EDIT MODE: NO dynamic update + key diversa (necessario per ricevere i drawings) ---
+    else:
+        m = build_base_map(c_lat, c_lon)
+        add_draw(m)
 
-    # --- UI SALVATAGGIO ---
+        # (opzionale) puoi mostrare anche il vecchio recinto mentre disegni:
+        if saved_coords:
+            folium.Polygon(
+                locations=saved_coords,
+                color="yellow",
+                weight=3,
+                fill=True,
+                fill_opacity=0.15,
+            ).add_to(m)
+
+        out = st_folium(
+            m,
+            use_container_width=True,
+            height=650,
+            key="main_map_edit",  # <-- key diversa = componente separato
+        )
+
+    # --- Estrazione poligono chiuso ---
+    new_coords = extract_polygon_from_out(out)
+    if new_coords:
+        st.session_state.temp_coords = new_coords
+
+    # --- UI salvataggio ---
+    # Mostra se in edit mode o se abbiamo già temp_coords
     if st.session_state.edit_mode or st.session_state.temp_coords:
         if st.session_state.temp_coords:
             st.success("📍 Poligono pronto!")
@@ -293,7 +304,6 @@ with col_table:
         cols = ["nome", "PROBLEMA"]
         if "batteria" in df_emergenza.columns:
             cols.append("batteria")
-
         st.dataframe(df_emergenza[cols], hide_index=True)
     else:
         st.success("✅ Tutto Sotto Controllo")
