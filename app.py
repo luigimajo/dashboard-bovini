@@ -14,6 +14,8 @@ st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
 if "edit_mode" not in st.session_state:
     st.session_state.edit_mode = False
+if "temp_coords" not in st.session_state:
+    st.session_state.temp_coords = None
 
 # --- 2. LOGICA REFRESH ---
 if not st.session_state.edit_mode:
@@ -23,6 +25,7 @@ else:
     st.sidebar.warning("🏗️ MODALITÀ DISEGNO: Refresh Disabilitato")
     if st.sidebar.button("🔓 Esci e annulla"):
         st.session_state.edit_mode = False
+        st.session_state.temp_coords = None
         st.rerun()
 
 ora_log = datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -46,16 +49,16 @@ df_mandria, saved_coords = load_data()
 
 # --- 4. COSTRUZIONE MAPPA ---
 c_lat, c_lon = 37.9747, 13.5753
-if not df_mandria.empty and "lat" in df_mandria.columns:
-    df_v = df_mandria.dropna(subset=["lat", "lon"]).query("lat != 0")
+if not df_mandria.empty and "lat" in df_mandria.columns and "lon" in df_mandria.columns:
+    df_v = df_mandria.dropna(subset=["lat", "lon"]).query("lat != 0 and lon != 0")
     if not df_v.empty:
         c_lat, c_lon = df_v["lat"].mean(), df_v["lon"].mean()
 
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
-# --- SATELLITE GOOGLE (FISSO) ---
+# SATELLITE GOOGLE (FISSO)
 folium.TileLayer(
-    tiles="https://mt1.google.com{x}&y={y}&z={z}",
+    tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
     attr="Google Satellite",
     name="Google Satellite",
     overlay=False,
@@ -81,39 +84,37 @@ with col_map:
     if not st.session_state.edit_mode:
         if st.button("🏗️ INIZIA DISEGNO NUOVO RECINTO"):
             st.session_state.edit_mode = True
+            st.session_state.temp_coords = None
             st.rerun()
 
-    # Render Mappa
     out = st_folium(m, width="100%", height=650, key="main_map")
 
-    # PULSANTE SALVA (Sempre visibile in Edit Mode)
+    # --- CATTURA COORDINATE (LOGICA RIPRISTINATA) ---
+    if out and out.get("all_drawings") and len(out["all_drawings"]) > 0:
+        raw = out["all_drawings"][-1]["geometry"]["coordinates"]
+        # GeoJSON Polygon: [ [ [lon,lat], ... ] ] -> noi prendiamo il primo anello raw[0]
+        if isinstance(raw, list) and len(raw) > 0:
+            st.session_state.temp_coords = [[p[1], p[0]] for p in raw[0]]
+
+    # --- PULSANTE SALVA (RIPRISTINATO E FUNZIONANTE) ---
     if st.session_state.edit_mode:
-        st.info("📍 Disegna il poligono. Quando hai chiuso la forma, clicca il tasto sotto.")
-        
-        if st.button("💾 CONFERMA E SALVA DEFINITIVAMENTE"):
-            # Estraiamo i dati DIRETTAMENTE dall'oggetto 'out' in questo frame
-            if out and out.get("all_drawings") and len(out["all_drawings"]) > 0:
-                # Recuperiamo l'ultimo poligono disegnato
-                geom = out["all_drawings"][-1].get("geometry")
-                if geom and geom.get("type") == "Polygon":
-                    raw = geom.get("coordinates")[0] # Prende il ring esterno
-                    # Conversione Lon/Lat -> Lat/Lon
-                    new_poly = [[p[1], p[0]] for p in raw]
-                    
-                    # Esecuzione Query
-                    with conn.session as s:
-                        s.execute(
-                            text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"),
-                            {"coords": json.dumps(new_poly)}
-                        )
-                        s.commit()
-                    
-                    st.success("✅ Recinto salvato con successo!")
-                    st.session_state.edit_mode = False
-                    time.sleep(1)
-                    st.rerun()
-            else:
-                st.error("⚠️ Nessun poligono rilevato. Assicurati di aver chiuso il disegno sulla mappa.")
+        if st.session_state.temp_coords:
+            st.success(f"📍 Poligono pronto ({len(st.session_state.temp_coords)} punti).")
+            if st.button("💾 CONFERMA E SALVA DEFINITIVAMENTE"):
+                with conn.session as s:
+                    s.execute(
+                        text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"),
+                        {"coords": json.dumps(st.session_state.temp_coords)},
+                    )
+                    s.commit()
+                
+                st.success("✅ Recinto salvato correttamente!")
+                st.session_state.edit_mode = False
+                st.session_state.temp_coords = None
+                time.sleep(1)
+                st.rerun()
+        else:
+            st.info("Disegna sulla mappa e chiudi il poligono cliccando sul primo punto.")
 
 with col_table:
     st.subheader("⚠️ Stato")
