@@ -8,7 +8,6 @@ streamlit-folium==0.26.2
 folium==0.20.0
 pandas>=2.0
 psycopg2-binary>=2.9
-
 streamlit==1.54.0
 leafmap>=0.43.0
 streamlit-autorefresh==1.0.1
