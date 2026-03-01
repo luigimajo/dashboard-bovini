@@ -2,7 +2,6 @@ import streamlit as st
 import streamlit.components.v1 as components
 import folium
 from streamlit_folium import st_folium
-from folium.plugins import Draw
 import json
 import pandas as pd
 from sqlalchemy import text
@@ -13,21 +12,27 @@ import uuid
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# --- SESSION STATE ---
+# --- SESSION STATE BASE ---
 if "edit_mode" not in st.session_state:
     st.session_state.edit_mode = False
-if "temp_coords" not in st.session_state:
-    st.session_state.temp_coords = None
-
-# refresh flag + session id + map key stabile + scadenza lock
 if "refresh_enabled" not in st.session_state:
     st.session_state.refresh_enabled = True
-if "session_id" not in st.session_state:
-    st.session_state.session_id = str(uuid.uuid4())
+
+# Draft recinto (click-to-build)
+if "draft_points" not in st.session_state:
+    st.session_state.draft_points = []  # lista di [lat, lon]
+if "temp_coords" not in st.session_state:
+    st.session_state.temp_coords = None  # poligono chiuso (lista di [lat, lon], ultimo=primo)
+if "last_click_sig" not in st.session_state:
+    st.session_state.last_click_sig = None  # anti-duplicazione click
 if "draw_session_id" not in st.session_state:
-    st.session_state.draw_session_id = 0
+    st.session_state.draw_session_id = 0  # key mappa stabile durante edit
 if "lock_expires_at" not in st.session_state:
     st.session_state.lock_expires_at = None
+
+# Identità sessione per lock
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
 
 # DEBUG toggle
 if "debug" not in st.session_state:
@@ -36,44 +41,35 @@ if "debug" not in st.session_state:
 LOCK_MINUTES = 5
 now = datetime.now()
 ora_log = now.strftime("%H:%M:%S.%f")[:-3]
+
 conn = st.connection("postgresql", type="sql")
 
 
-# -----------------------------
-# DEBUG helper
-# -----------------------------
 def dbg(msg: str):
     if st.session_state.debug:
         st.sidebar.write(msg)
 
 
 # -----------------------------
-# LOCK GLOBALE via DB
+# LOCK GLOBALE via DB (multi-istanza)
 # -----------------------------
 def ensure_lock_table():
-    """
-    Prova a creare la tabella lock se non esiste.
-    Se il DB user non ha permessi DDL, la tabella deve esistere già.
-    """
+    # Se non vuoi DDL da app, puoi rimuovere questa funzione dopo aver creato la tabella in Supabase
     try:
         with conn.session as s:
             s.execute(
                 text(
                     """
-                CREATE TABLE IF NOT EXISTS public.recinto_lock (
-                    id integer PRIMARY KEY,
-                    locked boolean NOT NULL DEFAULT false,
-                    locked_by text,
-                    locked_at timestamptz
-                );
-            """
+                    CREATE TABLE IF NOT EXISTS public.recinto_lock (
+                        id integer PRIMARY KEY,
+                        locked boolean NOT NULL DEFAULT false,
+                        locked_by text,
+                        locked_at timestamptz
+                    );
+                    """
                 )
             )
-            s.execute(
-                text(
-                    "INSERT INTO public.recinto_lock (id) VALUES (1) ON CONFLICT (id) DO NOTHING;"
-                )
-            )
+            s.execute(text("INSERT INTO public.recinto_lock (id) VALUES (1) ON CONFLICT (id) DO NOTHING;"))
             s.commit()
     except Exception as e:
         dbg(f"DDL lock table skipped/failed: {e}")
@@ -83,9 +79,6 @@ ensure_lock_table()
 
 
 def try_lock_recinto(lock_id: int, who: str, ttl_minutes: int) -> bool:
-    """
-    Lock atomico: acquisisce se unlocked o scaduto (locked_at vecchio).
-    """
     with conn.session as s:
         res = s.execute(
             text(
@@ -99,7 +92,7 @@ def try_lock_recinto(lock_id: int, who: str, ttl_minutes: int) -> bool:
                      OR locked_at < (now() - (:ttl || ' minutes')::interval)
                   )
                 RETURNING id;
-            """
+                """
             ),
             {"id": lock_id, "who": who, "ttl": str(ttl_minutes)},
         ).fetchone()
@@ -108,9 +101,6 @@ def try_lock_recinto(lock_id: int, who: str, ttl_minutes: int) -> bool:
 
 
 def unlock_recinto(lock_id: int, who: str):
-    """
-    Sblocca solo se sei tu l'owner.
-    """
     with conn.session as s:
         s.execute(
             text(
@@ -118,7 +108,7 @@ def unlock_recinto(lock_id: int, who: str):
                 UPDATE public.recinto_lock
                 SET locked = false, locked_by = NULL, locked_at = NULL
                 WHERE id = :id AND locked_by = :who;
-            """
+                """
             ),
             {"id": lock_id, "who": who},
         )
@@ -128,10 +118,7 @@ def unlock_recinto(lock_id: int, who: str):
 @st.cache_data(ttl=2)
 def get_lock_state(lock_id: int):
     try:
-        df = conn.query(
-            "SELECT locked, locked_by, locked_at FROM public.recinto_lock WHERE id = 1",
-            ttl=0,
-        )
+        df = conn.query("SELECT locked, locked_by, locked_at FROM public.recinto_lock WHERE id = 1", ttl=0)
         if df.empty:
             return False, None, None
         r = df.iloc[0]
@@ -141,7 +128,7 @@ def get_lock_state(lock_id: int):
 
 
 # -----------------------------
-# DEBUG PANEL (always in sidebar)
+# DEBUG PANEL
 # -----------------------------
 dbg("---- DEBUG ----")
 dbg(f"Run now: {datetime.now().strftime('%H:%M:%S')}")
@@ -150,11 +137,12 @@ dbg(f"refresh_enabled={st.session_state.refresh_enabled}")
 dbg(f"lock_expires_at={st.session_state.lock_expires_at!r}")
 dbg(f"draw_session_id={st.session_state.draw_session_id}")
 dbg(f"session_id={st.session_state.session_id}")
+dbg(f"draft_points={len(st.session_state.draft_points)}")
+dbg(f"temp_coords={'yes' if st.session_state.temp_coords else 'no'}")
 
 # -----------------------------
-# REFRESH 30s (strumentato)
+# REFRESH 30s (solo fuori edit)
 # -----------------------------
-refresh_counter = None
 if st.session_state.refresh_enabled:
     refresh_counter = st_autorefresh(interval=30000, key="timer_primario_30s")
     dbg(f"AUTOREFRESH MONTATO: counter={refresh_counter}")
@@ -163,56 +151,25 @@ else:
     st.sidebar.warning("🏗️ MODALITÀ DISEGNO: Refresh Disabilitato")
 
 # -----------------------------
-# TIMEOUT DISEGNO (5 min): se scade, annulla e riabilita refresh + unlock
+# TIMEOUT 5 MIN: se scade, sblocca e ripristina
 # -----------------------------
 if st.session_state.edit_mode and st.session_state.lock_expires_at is not None:
     if now >= st.session_state.lock_expires_at:
-        dbg("TIMEOUT SCADUTO: auto-annullo e ripristino refresh")
         try:
             unlock_recinto(1, st.session_state.session_id)
-        except Exception as e:
-            dbg(f"unlock timeout failed: {e}")
+        except Exception:
+            pass
         st.session_state.edit_mode = False
-        st.session_state.temp_coords = None
         st.session_state.refresh_enabled = True
         st.session_state.lock_expires_at = None
+        st.session_state.draft_points = []
+        st.session_state.temp_coords = None
+        st.session_state.last_click_sig = None
         st.sidebar.error("⏱️ Tempo scaduto (5 min): disegno annullato, refresh riabilitato.")
         st.rerun()
 
 # -----------------------------
-# SIDEBAR (originale + lock status + annulla)
-# -----------------------------
-with st.sidebar:
-    st.header("📡 STATO RETE LORA")
-    st.write(f"Ultimo Refresh: **{ora_log}**")
-
-    locked, locked_by, locked_at = get_lock_state(1)
-    if locked:
-        if locked_by == st.session_state.session_id:
-            st.info("🔒 Lock recinto attivo (questa sessione).")
-        else:
-            st.info("🔒 Recinto in modifica da un'altra sessione.")
-        st.caption(f"locked_by: {locked_by}")
-        st.caption(f"locked_at: {locked_at}")
-    else:
-        st.success("🔓 Nessun lock attivo sul recinto.")
-
-    # Pulsante annulla (in sidebar)
-    if st.session_state.edit_mode:
-        if st.button("🔓 Esci e annulla"):
-            dbg("CLICK: ANNULLA")
-            try:
-                unlock_recinto(1, st.session_state.session_id)
-            except Exception as e:
-                dbg(f"unlock annulla failed: {e}")
-            st.session_state.edit_mode = False
-            st.session_state.temp_coords = None
-            st.session_state.refresh_enabled = True
-            st.session_state.lock_expires_at = None
-            st.rerun()
-
-# -----------------------------
-# 3. FUNZIONE CARICAMENTO DATI (originale)
+# LOAD DATA
 # -----------------------------
 @st.cache_data(ttl=2)
 def load_data():
@@ -232,9 +189,38 @@ def load_data():
 df_mandria, df_gateways, saved_coords = load_data()
 
 # -----------------------------
-# 4. SIDEBAR: gateway + mandria (originale)
+# SIDEBAR
 # -----------------------------
 with st.sidebar:
+    st.header("📡 STATO RETE LORA")
+    st.write(f"Ultimo Refresh: **{ora_log}**")
+
+    locked, locked_by, locked_at = get_lock_state(1)
+    if locked:
+        if locked_by == st.session_state.session_id:
+            st.info("🔒 Lock recinto attivo (questa sessione).")
+        else:
+            st.info("🔒 Recinto in modifica da un'altra sessione.")
+        st.caption(f"locked_by: {locked_by}")
+        st.caption(f"locked_at: {locked_at}")
+    else:
+        st.success("🔓 Nessun lock attivo sul recinto.")
+
+    # Annulla sempre disponibile in edit
+    if st.session_state.edit_mode:
+        if st.button("🔓 Esci e annulla"):
+            try:
+                unlock_recinto(1, st.session_state.session_id)
+            except Exception:
+                pass
+            st.session_state.edit_mode = False
+            st.session_state.refresh_enabled = True
+            st.session_state.lock_expires_at = None
+            st.session_state.draft_points = []
+            st.session_state.temp_coords = None
+            st.session_state.last_click_sig = None
+            st.rerun()
+
     if not df_gateways.empty:
         for _, g in df_gateways.iterrows():
             status_color = "#28a745" if g["stato"] == "ONLINE" else "#dc3545"
@@ -245,7 +231,7 @@ with st.sidebar:
                     <b style="font-size: 14px;">{icon} {g['nome']}</b><br>
                     <small>Stato: {g['stato']}</small>
                 </div>
-            """,
+                """,
                 unsafe_allow_html=True,
             )
 
@@ -256,9 +242,7 @@ with st.sidebar:
             if g_id and g_nome:
                 with conn.session as s:
                     s.execute(
-                        text(
-                            "INSERT INTO gateway (id, nome, stato) VALUES (:id, :nome, 'ONLINE')"
-                        ),
+                        text("INSERT INTO gateway (id, nome, stato) VALUES (:id, :nome, 'ONLINE')"),
                         {"id": g_id, "nome": g_nome},
                     )
                     s.commit()
@@ -266,6 +250,7 @@ with st.sidebar:
 
     st.divider()
     st.header("📋 GESTIONE BOVINI")
+
     with st.expander("➕ Aggiungi Bovino"):
         n_id = st.text_input("ID Tracker")
         n_nome = st.text_input("Nome Animale")
@@ -292,8 +277,9 @@ with st.sidebar:
                     s.commit()
                 st.rerun()
 
+
 # -----------------------------
-# 5. COSTRUZIONE MAPPA (originale + extra temp polygon)
+# COSTRUZIONE MAPPA
 # -----------------------------
 c_lat, c_lon = 37.9747, 13.5753
 if not df_mandria.empty and "lat" in df_mandria.columns and "lon" in df_mandria.columns:
@@ -311,43 +297,38 @@ folium.TileLayer(
     control=False,
 ).add_to(m)
 
+# Recinto salvato (giallo)
 if saved_coords:
     folium.Polygon(locations=saved_coords, color="yellow", weight=3, fill=True, fill_opacity=0.2).add_to(m)
 
-# EXTRA: ridisegna poligono temporaneo ad ogni rerun (se già chiuso almeno una volta)
-if st.session_state.edit_mode and st.session_state.temp_coords:
-    folium.Polygon(
-        locations=st.session_state.temp_coords,
-        color="cyan",
-        weight=3,
-        fill=True,
-        fill_opacity=0.15,
-    ).add_to(m)
-
+# Bovini
 for _, row in df_mandria.iterrows():
-    if pd.notna(row["lat"]) and row["lat"] != 0:
-        color = "green" if row["stato_recinto"] == "DENTRO" else "red"
+    if pd.notna(row.get("lat")) and row.get("lat") != 0:
+        color = "green" if row.get("stato_recinto") == "DENTRO" else "red"
         folium.Marker([row["lat"], row["lon"]], icon=folium.Icon(color=color, icon="info-sign")).add_to(m)
 
-Draw(draw_options={"polyline": False, "rectangle": False, "circle": False, "marker": False, "polygon": True}).add_to(m)
+# EDIT MODE: mostra polilinea (azzurra) e/o poligono chiuso (ciano)
+if st.session_state.edit_mode:
+    folium.LatLngPopup().add_to(m)  # consente click e mostra lat/lon
+    if len(st.session_state.draft_points) >= 2:
+        folium.PolyLine(st.session_state.draft_points, weight=3).add_to(m)
+    if st.session_state.temp_coords and len(st.session_state.temp_coords) >= 4:
+        folium.Polygon(st.session_state.temp_coords, weight=3, fill=True, fill_opacity=0.15).add_to(m)
+
 
 # -----------------------------
-# 6. LAYOUT PRINCIPALE
+# LAYOUT PRINCIPALE
 # -----------------------------
 st.title("🛰️ MONITORAGGIO BOVINI H24")
 col_map, col_table = st.columns([3, 1])
 
 with col_map:
     if not st.session_state.edit_mode:
-        if st.button("🏗️ INIZIA DISEGNO NUOVO RECINTO"):
-            dbg("CLICK: INIZIA DISEGNO")
-            dbg(f"Prima: edit_mode={st.session_state.edit_mode}, refresh_enabled={st.session_state.refresh_enabled}")
-
+        if st.button("🏗️ INIZIA NUOVO RECINTO (clic sulla mappa)"):
             ok = False
             try:
                 ok = try_lock_recinto(1, st.session_state.session_id, LOCK_MINUTES)
-            except Exception as e:
-                dbg(f"try_lock_recinto error: {e}")
+            except Exception:
                 ok = False
 
             if not ok:
@@ -355,24 +336,21 @@ with col_map:
             else:
                 st.session_state.edit_mode = True
                 st.session_state.refresh_enabled = False
-                st.session_state.temp_coords = None
                 st.session_state.lock_expires_at = datetime.now() + timedelta(minutes=LOCK_MINUTES)
-                st.session_state.draw_session_id += 1  # nuova istanza mappa SOLO all'inizio
-
-                dbg(f"Dopo set: edit_mode={st.session_state.edit_mode}, refresh_enabled={st.session_state.refresh_enabled}")
-                dbg(f"lock_expires_at settato a: {st.session_state.lock_expires_at!r}")
-
+                st.session_state.draft_points = []
+                st.session_state.temp_coords = None
+                st.session_state.last_click_sig = None
+                st.session_state.draw_session_id += 1
                 st.rerun()
 
-    # Countdown visibile (JS client-side)
+    # Timer visibile (client-side)
     if st.session_state.edit_mode and st.session_state.lock_expires_at:
         expires_iso = st.session_state.lock_expires_at.strftime("%Y-%m-%dT%H:%M:%S")
         components.html(
             f"""
             <div style="padding:10px;border:1px solid rgba(255,255,255,0.25);border-radius:8px;">
-              <div style="font-weight:700;margin-bottom:6px;">⏱️ Tempo massimo per disegnare: {LOCK_MINUTES} minuti</div>
+              <div style="font-weight:700;margin-bottom:6px;">⏱️ Tempo massimo: {LOCK_MINUTES} minuti</div>
               <div>Tempo rimanente: <span id="cd" style="font-weight:800;">--:--</span></div>
-              <div style="opacity:0.75;font-size:12px;margin-top:4px;">Scadenza: {expires_iso}</div>
             </div>
             <script>
               const expires = new Date("{expires_iso}").getTime();
@@ -389,26 +367,56 @@ with col_map:
               setInterval(tick, 250);
             </script>
             """,
-            height=95,
+            height=80,
         )
 
-    # key mappa stabile durante disegno
     map_key = f"main_map_{st.session_state.draw_session_id}"
     out = st_folium(m, width="100%", height=650, key=map_key)
 
-    if out and out.get("all_drawings") and len(out["all_drawings"]) > 0:
-        raw = out["all_drawings"][-1]["geometry"]["coordinates"]
-        st.session_state.temp_coords = (
-            [[p[1], p[0]] for p in raw[0]]
-            if isinstance(raw[0][0], list)
-            else [[p[1], p[0]] for p in raw]
-        )
+    # Cattura click e accumula punti (anti-duplicazione)
+    if st.session_state.edit_mode and out and out.get("last_clicked"):
+        lat = out["last_clicked"]["lat"]
+        lon = out["last_clicked"]["lng"]
+        click_sig = (round(lat, 7), round(lon, 7))
+        if click_sig != st.session_state.last_click_sig:
+            st.session_state.draft_points.append([lat, lon])
+            st.session_state.last_click_sig = click_sig
+            # ogni click -> rerun controllato, ma i punti restano in session_state
+            st.rerun()
 
+    # UI edit
     if st.session_state.edit_mode:
+        st.write(f"📌 Vertici inseriti: **{len(st.session_state.draft_points)}** (clicca sulla mappa per aggiungere)")
+
+        b1, b2, b3 = st.columns(3)
+
+        with b1:
+            if st.button("↩️ Undo ultimo punto"):
+                if st.session_state.draft_points:
+                    st.session_state.draft_points.pop()
+                    st.session_state.temp_coords = None
+                    st.session_state.last_click_sig = None
+                    st.rerun()
+
+        with b2:
+            if st.button("✅ Chiudi poligono"):
+                if len(st.session_state.draft_points) < 3:
+                    st.warning("Servono almeno 3 punti per chiudere un poligono.")
+                else:
+                    # poligono chiuso: aggiungi il primo punto alla fine
+                    st.session_state.temp_coords = st.session_state.draft_points + [st.session_state.draft_points[0]]
+                    st.rerun()
+
+        with b3:
+            if st.button("🧹 Reset punti"):
+                st.session_state.draft_points = []
+                st.session_state.temp_coords = None
+                st.session_state.last_click_sig = None
+                st.rerun()
+
         if st.session_state.temp_coords:
-            st.success("📍 Poligono pronto!")
+            st.success("📍 Poligono chiuso e pronto per il salvataggio.")
             if st.button("💾 SALVA NUOVO RECINTO"):
-                dbg("CLICK: SALVA RECINTO")
                 with conn.session as s:
                     s.execute(
                         text(
@@ -421,22 +429,18 @@ with col_map:
 
                 try:
                     unlock_recinto(1, st.session_state.session_id)
-                except Exception as e:
-                    dbg(f"unlock save failed: {e}")
+                except Exception:
+                    pass
 
                 st.session_state.edit_mode = False
-                st.session_state.temp_coords = None
                 st.session_state.refresh_enabled = True
                 st.session_state.lock_expires_at = None
+                st.session_state.draft_points = []
+                st.session_state.temp_coords = None
+                st.session_state.last_click_sig = None
                 st.rerun()
         else:
-            st.info("Disegna sulla mappa e chiudi il poligono.")
-
-# ✅ FIX: in modalità disegno, non renderizzare il resto (tabelle/emergenze/storico)
-# Questo riduce drasticamente i rerun “non voluti” che resettano Leaflet-Draw.
-if st.session_state.edit_mode:
-    st.info("🏗️ Modalità disegno attiva: pannelli e tabelle sospesi finché non salvi/annulli.")
-    st.stop()
+            st.info("Quando hai finito i vertici, premi **✅ Chiudi poligono** e poi **💾 SALVA**.")
 
 with col_table:
     st.subheader("⚠️ Pannello Emergenze")
