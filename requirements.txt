@@ -5,10 +5,11 @@ pandas
 sqlalchemy
 paho-mqtt
 streamlit-folium==0.26.2
-leafmap>=0.43.0
-streamlit>=1.54.0
 folium==0.20.0
-sqlalchemy>=2.0
 pandas>=2.0
 psycopg2-binary>=2.9
-streamlit-autorefresh>=1.0.1
+
+streamlit==1.54.0
+leafmap>=0.43.0
+streamlit-autorefresh==1.0.1
+sqlalchemy>=2.0
