@@ -341,9 +341,7 @@ with col_map:
     if not st.session_state.edit_mode:
         if st.button("🏗️ INIZIA DISEGNO NUOVO RECINTO"):
             dbg("CLICK: INIZIA DISEGNO")
-            dbg(
-                f"Prima: edit_mode={st.session_state.edit_mode}, refresh_enabled={st.session_state.refresh_enabled}"
-            )
+            dbg(f"Prima: edit_mode={st.session_state.edit_mode}, refresh_enabled={st.session_state.refresh_enabled}")
 
             ok = False
             try:
@@ -359,20 +357,15 @@ with col_map:
                 st.session_state.refresh_enabled = False
                 st.session_state.temp_coords = None
                 st.session_state.lock_expires_at = datetime.now() + timedelta(minutes=LOCK_MINUTES)
+                st.session_state.draw_session_id += 1  # nuova istanza mappa SOLO all'inizio
 
-                # nuova istanza mappa SOLO quando inizi un nuovo recinto
-                st.session_state.draw_session_id += 1
-
-                dbg(
-                    f"Dopo set: edit_mode={st.session_state.edit_mode}, refresh_enabled={st.session_state.refresh_enabled}"
-                )
+                dbg(f"Dopo set: edit_mode={st.session_state.edit_mode}, refresh_enabled={st.session_state.refresh_enabled}")
                 dbg(f"lock_expires_at settato a: {st.session_state.lock_expires_at!r}")
 
                 st.rerun()
 
     # Countdown visibile (JS client-side)
     if st.session_state.edit_mode and st.session_state.lock_expires_at:
-        # ISO super compatibile (senza microsecondi)
         expires_iso = st.session_state.lock_expires_at.strftime("%Y-%m-%dT%H:%M:%S")
         components.html(
             f"""
@@ -439,6 +432,12 @@ with col_map:
         else:
             st.info("Disegna sulla mappa e chiudi il poligono.")
 
+# ✅ FIX: in modalità disegno, non renderizzare il resto (tabelle/emergenze/storico)
+# Questo riduce drasticamente i rerun “non voluti” che resettano Leaflet-Draw.
+if st.session_state.edit_mode:
+    st.info("🏗️ Modalità disegno attiva: pannelli e tabelle sospesi finché non salvi/annulli.")
+    st.stop()
+
 with col_table:
     st.subheader("⚠️ Pannello Emergenze")
     df_emergenza = df_mandria[
@@ -446,7 +445,6 @@ with col_table:
     ].copy()
 
     if not df_emergenza.empty:
-
         def genera_avvisi(row):
             avv = []
             if row.get("stato_recinto") == "FUORI":
