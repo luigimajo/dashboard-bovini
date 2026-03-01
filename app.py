@@ -8,21 +8,25 @@ from streamlit_autorefresh import st_autorefresh
 from datetime import datetime
 import time
 
-# ✅ componente per estrarre poligoni come GeoJSON
-from st_map_polygon_extract import st_map_polygon_extract
+import streamlit.components.v1 as components
 
+
+# --- COMPONENT DECLARATION (light custom component) ---
+leaflet_geoman = components.declare_component(
+    "leaflet_geoman",
+    path="leaflet_geoman_component",
+)
 
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# --- Session state ---
+# Session state
 if "edit_mode" not in st.session_state:
     st.session_state.edit_mode = False
 if "temp_coords" not in st.session_state:
     st.session_state.temp_coords = None
 
-
-# --- 2. LOGICA REFRESH (ANTI-RAFFICA + BLOCCO DISEGNO) ---
+# --- 2. REFRESH ---
 if not st.session_state.edit_mode:
     st_autorefresh(interval=30000, key="timer_primario_30s")
 else:
@@ -34,12 +38,10 @@ else:
         st.session_state.temp_coords = None
         st.rerun()
 
-
 ora_log = datetime.now().strftime("%H:%M:%S.%f")[:-3]
 conn = st.connection("postgresql", type="sql")
 
-
-# --- 3. FUNZIONE CARICAMENTO DATI ---
+# --- 3. LOAD DATA ---
 @st.cache_data(ttl=2)
 def load_data():
     try:
@@ -55,11 +57,9 @@ def load_data():
     except Exception:
         return pd.DataFrame(), pd.DataFrame(), []
 
-
 df_mandria, df_gateways, saved_coords = load_data()
 
-
-# --- 4. SIDEBAR COMPLETA ---
+# --- 4. SIDEBAR ---
 with st.sidebar:
     st.header("📡 STATO RETE LORA")
     st.write(f"Ultimo Refresh: **{ora_log}**")
@@ -120,84 +120,85 @@ with st.sidebar:
                     s.commit()
                 st.rerun()
 
-
-# --- 5. COSTRUZIONE MAPPA (SOLO VISUALIZZAZIONE) ---
+# --- 5. CENTER MAP ---
 c_lat, c_lon = 37.9747, 13.5753
 if not df_mandria.empty and "lat" in df_mandria.columns and "lon" in df_mandria.columns:
     df_v = df_mandria.dropna(subset=["lat", "lon"]).query("lat != 0 and lon != 0")
     if not df_v.empty:
-        c_lat, c_lon = df_v["lat"].mean(), df_v["lon"].mean()
+        c_lat, c_lon = float(df_v["lat"].mean()), float(df_v["lon"].mean())
 
-m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
-
-# ✅ Satellite Google corretto
-folium.TileLayer(
-    tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
-    attr="Google Satellite",
-    name="Google Satellite",
-    overlay=False,
-    control=False,
-).add_to(m)
-
-if saved_coords:
-    folium.Polygon(locations=saved_coords, color="yellow", weight=3, fill=True, fill_opacity=0.2).add_to(m)
-
-for _, row in df_mandria.iterrows():
-    if pd.notna(row.get("lat")) and row["lat"] != 0:
-        color = "green" if row.get("stato_recinto") == "DENTRO" else "red"
-        folium.Marker(
-            [row["lat"], row["lon"]],
-            icon=folium.Icon(color=color, icon="info-sign"),
-            popup=str(row.get("nome", "")),
-        ).add_to(m)
-
-
-# --- 6. LAYOUT PRINCIPALE ---
+# --- 6. UI ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
 col_map, col_table = st.columns([3, 1])
 
 with col_map:
-    # Bottone per entrare in modalità disegno
     if not st.session_state.edit_mode:
         if st.button("🏗️ INIZIA DISEGNO NUOVO RECINTO"):
             st.session_state.edit_mode = True
             st.session_state.temp_coords = None
             st.rerun()
 
-    # VIEW MODE: mappa folium normale
+    # VIEW MODE: Folium satellite + overlay
     if not st.session_state.edit_mode:
+        m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
+
+        folium.TileLayer(
+            tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+            attr="Google Satellite",
+            name="Google Satellite",
+            overlay=False,
+            control=False,
+        ).add_to(m)
+
+        if saved_coords:
+            folium.Polygon(
+                locations=saved_coords,
+                color="yellow",
+                weight=3,
+                fill=True,
+                fill_opacity=0.2,
+            ).add_to(m)
+
+        if not df_mandria.empty and "lat" in df_mandria.columns and "lon" in df_mandria.columns:
+            for _, row in df_mandria.iterrows():
+                if pd.notna(row.get("lat")) and row["lat"] != 0:
+                    color = "green" if row.get("stato_recinto") == "DENTRO" else "red"
+                    folium.Marker(
+                        [row["lat"], row["lon"]],
+                        icon=folium.Icon(color=color, icon="info-sign"),
+                        popup=str(row.get("nome", "")),
+                    ).add_to(m)
+
         st_folium(m, use_container_width=True, height=650, key="main_map_view")
 
-    # EDIT MODE: componente disegno che restituisce GeoJSON
+    # EDIT MODE: Custom Leaflet + Geoman (Google Satellite) + returns coords
     else:
-        st.info("✏️ Disegna il recinto nel pannello qui sotto e chiudi il poligono.")
+        st.info("✏️ Disegna il recinto (Leaflet-Geoman). Usa *removal* per cancellare e ridisegnare.")
 
-        # Questo componente restituisce una lista di GeoJSON (o None)
-        geo = st_map_polygon_extract()
+        result = leaflet_geoman(
+            center=[c_lat, c_lon],
+            zoom=18,
+            saved_coords=saved_coords if saved_coords else None,
+            clear=False,
+            force_show_saved=False,
+            key="geoman_draw",
+            default={"coords": None},
+        )
 
-        # Debug opzionale (puoi commentare)
-        with st.expander("🧪 DEBUG poligoni (GeoJSON)"):
-            st.write(geo)
+        coords = None
+        if isinstance(result, dict):
+            coords = result.get("coords")
 
-        # Estrai ultimo poligono valido
-        temp_coords = None
-        try:
-            if geo and isinstance(geo, list) and len(geo) > 0:
-                last = geo[-1]
-                # atteso: {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[lon,lat],...]]}}
-                geom = last.get("geometry", {})
-                if geom.get("type") == "Polygon":
-                    ring = geom.get("coordinates", [])[0]  # anello esterno
-                    if ring and isinstance(ring, list):
-                        temp_coords = [[p[1], p[0]] for p in ring if isinstance(p, list) and len(p) >= 2]
-        except Exception:
-            temp_coords = None
+        # Aggiorna session_state se arrivano coords valide
+        if coords and isinstance(coords, list) and len(coords) >= 3:
+            st.session_state.temp_coords = coords
+        elif coords is None:
+            # se l'utente cancella il poligono
+            st.session_state.temp_coords = None
 
-        st.session_state.temp_coords = temp_coords
-
-        # Pulsante salva (identico al tuo)
+        # UI salva (identico)
         if st.session_state.temp_coords:
-            st.success(f"📍 Poligono rilevato ({len(st.session_state.temp_coords)} punti).")
+            st.success(f"📍 Poligono pronto ({len(st.session_state.temp_coords)} punti).")
             if st.button("💾 CONFERMA E SALVA DEFINITIVAMENTE"):
                 with conn.session as s:
                     s.execute(
