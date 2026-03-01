@@ -1,0 +1,201 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1"
+    />
+    <title>Leaflet Geoman</title>
+
+    <!-- Leaflet -->
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+
+    <!-- Leaflet-Geoman -->
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/@geoman-io/leaflet-geoman-free@2.16.0/dist/leaflet-geoman.css"
+    />
+    <script src="https://unpkg.com/@geoman-io/leaflet-geoman-free@2.16.0/dist/leaflet-geoman.min.js"></script>
+
+    <!-- Streamlit component lib -->
+    <script src="https://unpkg.com/streamlit-component-lib@1.4.0/dist/index.js"></script>
+
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+      }
+      #map {
+        width: 100%;
+        height: 650px;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="map"></div>
+
+    <script>
+      const Streamlit = window.Streamlit;
+      const RenderData = window.StreamlitRenderData;
+
+      let map = null;
+      let polygonLayer = null;
+      let lastSent = null;
+
+      function sendValue(valueObj) {
+        const payload = JSON.stringify(valueObj);
+        if (payload === lastSent) return;
+        lastSent = payload;
+        Streamlit.setComponentValue(valueObj);
+      }
+
+      function latLngsToCoords(latlngs) {
+        // latlngs for Polygon: [ [ {lat,lng}, ... ] ]
+        const ring = Array.isArray(latlngs) ? latlngs[0] : [];
+        const coords = ring.map((p) => [p.lat, p.lng]);
+        return coords;
+      }
+
+      function clearPolygon() {
+        if (polygonLayer) {
+          map.removeLayer(polygonLayer);
+          polygonLayer = null;
+        }
+        sendValue({ coords: null });
+      }
+
+      function setPolygonFromCoords(coords) {
+        if (!coords || !Array.isArray(coords) || coords.length < 3) return;
+        if (polygonLayer) map.removeLayer(polygonLayer);
+
+        polygonLayer = L.polygon(coords, {
+          color: "yellow",
+          weight: 3,
+          fillOpacity: 0.2,
+        }).addTo(map);
+
+        // Fit bounds softly
+        try {
+          map.fitBounds(polygonLayer.getBounds(), { padding: [20, 20] });
+        } catch (e) {}
+      }
+
+      function ensureMap(args) {
+        if (map) return;
+
+        const center = args.center || [37.9747, 13.5753];
+        const zoom = args.zoom || 18;
+
+        map = L.map("map", {
+          center: center,
+          zoom: zoom,
+          zoomControl: true,
+        });
+
+        // Google Satellite tiles
+        L.tileLayer("https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}", {
+          attribution: "Google Satellite",
+          maxZoom: 21,
+        }).addTo(map);
+
+        // Geoman controls
+        map.pm.addControls({
+          position: "topleft",
+          drawMarker: false,
+          drawCircleMarker: false,
+          drawPolyline: false,
+          drawRectangle: false,
+          drawCircle: false,
+          drawText: false,
+          drawPolygon: true,
+          editMode: true,
+          dragMode: false,
+          cutPolygon: false,
+          removalMode: true,
+          rotateMode: false,
+          oneBlock: true,
+        });
+
+        // When a polygon is created
+        map.on("pm:create", (e) => {
+          if (polygonLayer) {
+            map.removeLayer(polygonLayer);
+            polygonLayer = null;
+          }
+          polygonLayer = e.layer;
+
+          const coords = latLngsToCoords(polygonLayer.getLatLngs());
+          sendValue({ coords: coords });
+        });
+
+        // When edited
+        map.on("pm:edit", (e) => {
+          if (!polygonLayer) return;
+          const coords = latLngsToCoords(polygonLayer.getLatLngs());
+          sendValue({ coords: coords });
+        });
+
+        // When removed
+        map.on("pm:remove", (e) => {
+          // if the removed layer is our polygon, clear
+          if (polygonLayer && e.layer === polygonLayer) {
+            polygonLayer = null;
+          }
+          sendValue({ coords: null });
+        });
+
+        // Also handle vertex changes (some geoman actions emit these)
+        map.on("pm:vertexadded", () => {
+          if (!polygonLayer) return;
+          const coords = latLngsToCoords(polygonLayer.getLatLngs());
+          sendValue({ coords: coords });
+        });
+        map.on("pm:vertexremoved", () => {
+          if (!polygonLayer) return;
+          const coords = latLngsToCoords(polygonLayer.getLatLngs());
+          sendValue({ coords: coords });
+        });
+
+        Streamlit.setFrameHeight(650);
+      }
+
+      function onRender(event) {
+        const args = event.detail.args || {};
+        ensureMap(args);
+
+        // Incoming saved polygon to show
+        const incoming = args.saved_coords || null;
+
+        // If we receive saved polygon and we currently have no drawn polygon,
+        // display it (view-only baseline).
+        if (incoming && (!polygonLayer || args.force_show_saved === true)) {
+          setPolygonFromCoords(incoming);
+        }
+
+        // If python asks to clear drawing
+        if (args.clear === true) {
+          clearPolygon();
+        }
+
+        Streamlit.setFrameHeight(650);
+      }
+
+      Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
+      Streamlit.setComponentReady();
+    </script>
+  </body>
+</html>
