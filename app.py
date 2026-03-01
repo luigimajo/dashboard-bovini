@@ -16,8 +16,8 @@ st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 if "edit_mode" not in st.session_state:
     st.session_state.edit_mode = False
 
-# --- 2. LOGICA REFRESH (PULIZIA TOTALE IN EDIT) ---
-# Se siamo in edit_mode, NON eseguiamo st_autorefresh. Il timer nel browser sparisce.
+# --- 2. LOGICA REFRESH (DISABILITATO IN EDIT MODE) ---
+# Se siamo in edit_mode, non eseguiamo st_autorefresh: il timer nel browser sparisce.
 if not st.session_state.edit_mode:
     st_autorefresh(interval=30000, key="timer_stabile_30s")
 else:
@@ -37,24 +37,25 @@ def load_data():
         df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
         coords = []
         if not df_r.empty:
-            # Accesso sicuro per nome colonna
-            val = df_r.iloc[0]['coords']
-            coords = json.loads(val) if isinstance(val, str) else val
+            # Accesso sicuro alla colonna 'coords' tramite il nome
+            val = df_r.iloc[0]['coords'] if 'coords' in df_r.columns else None
+            if val:
+                coords = json.loads(val) if isinstance(val, str) else val
         return df_m, coords
     except Exception:
         return pd.DataFrame(), []
 
 df_mandria, saved_coords = load_data()
 
-# --- 4. COSTRUZIONE MAPPA (CON PROTEZIONE KEYERROR) ---
+# --- 4. COSTRUZIONE MAPPA (SICURA DA KEYERROR) ---
 c_lat, c_lon = 37.9747, 13.5753
 
-# Verifichiamo che le colonne esistano prima di pulire i dati
+# Verifichiamo che le colonne esistano prima di calcolare la media
 if not df_mandria.empty and 'lat' in df_mandria.columns and 'lon' in df_mandria.columns:
-    df_v = df_mandria.dropna(subset=['lat', 'lon'])
-    df_v = df_v[(df_v['lat'] != 0) & (df_v['lon'] != 0)]
-    if not df_v.empty:
-        c_lat, c_lon = df_v['lat'].mean(), df_v['lon'].mean()
+    df_temp = df_mandria.dropna(subset=['lat', 'lon'])
+    df_temp = df_temp[(df_temp['lat'] != 0) & (df_temp['lon'] != 0)]
+    if not df_temp.empty:
+        c_lat, c_lon = df_temp['lat'].mean(), df_temp['lon'].mean()
 
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
@@ -71,7 +72,7 @@ if saved_coords:
     folium.Polygon(locations=saved_coords, color="yellow", weight=3, fill=True, fill_opacity=0.2).add_to(m)
 
 # Marker animali (solo se colonne presenti)
-if not df_mandria.empty and 'lat' in df_mandria.columns:
+if not df_mandria.empty and 'lat' in df_mandria.columns and 'lon' in df_mandria.columns:
     for _, row in df_mandria.iterrows():
         if pd.notna(row['lat']) and row['lat'] != 0:
             color = 'green' if row.get('stato_recinto') == 'DENTRO' else 'red'
@@ -94,7 +95,7 @@ with col_map:
     
     # MOSTRA TASTO SALVA (Solo in edit_mode)
     if st.session_state.edit_mode:
-        st.info("📍 Disegna il recinto sulla mappa. Quando hai CHIUSO il poligono, clicca il tasto sotto.")
+        st.info("📍 Disegna il poligono sulla mappa. Quando hai CHIUSO il poligono, clicca il tasto sotto.")
         if st.button("💾 SALVA NUOVO RECINTO"):
             if out and out.get('all_drawings') and len(out['all_drawings']) > 0:
                 raw = out['all_drawings'][-1]['geometry']['coordinates'][0]
@@ -115,8 +116,8 @@ with col_map:
 
 with col_table:
     st.subheader("⚠️ Stato")
-    if not df_mandria.empty:
-        df_em = df_mandria[df_mandria.get('stato_recinto') == 'FUORI']
+    if not df_mandria.empty and 'stato_recinto' in df_mandria.columns:
+        df_em = df_mandria[df_mandria['stato_recinto'] == 'FUORI']
         st.dataframe(df_em[['nome', 'batteria']] if not df_em.empty else pd.DataFrame(), hide_index=True)
 
 st.subheader("📝 Storico Mandria")
