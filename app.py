@@ -12,20 +12,16 @@ import time
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# Inizializzazione stati di sessione
 if "edit_mode" not in st.session_state:
     st.session_state.edit_mode = False
 if "temp_coords" not in st.session_state:
     st.session_state.temp_coords = None
 
-# --- 2. LOGICA REFRESH (ANTI-TRIPLETTE + BLOCCO DISEGNO) ---
-# FIX: disarmo hard del timer quando entri in edit_mode
+# --- 2. LOGICA REFRESH ---
 if not st.session_state.edit_mode:
     st_autorefresh(interval=30000, key="timer_primario_30s")
 else:
-    # Monta un autorefresh "diverso" con interval=0 per smontare il timer già armato nel browser
     st_autorefresh(interval=0, key="timer_edit_disabled")
-
     st.sidebar.warning("🏗️ MODALITÀ DISEGNO: Refresh Disabilitato")
     if st.sidebar.button("🔓 Esci e annulla"):
         st.session_state.edit_mode = False
@@ -35,7 +31,7 @@ else:
 ora_log = datetime.now().strftime("%H:%M:%S.%f")[:-3]
 conn = st.connection("postgresql", type="sql")
 
-# --- 3. FUNZIONE CARICAMENTO DATI ---
+# --- 3. CARICAMENTO DATI ---
 @st.cache_data(ttl=2)
 def load_data():
     try:
@@ -51,9 +47,8 @@ def load_data():
 
 df_mandria, saved_coords = load_data()
 
-# --- 4. COSTRUZIONE MAPPA (CON PROTEZIONE KEYERROR) ---
+# --- 4. COSTRUZIONE MAPPA ---
 c_lat, c_lon = 37.9747, 13.5753
-
 if not df_mandria.empty and "lat" in df_mandria.columns and "lon" in df_mandria.columns:
     df_valid = df_mandria.dropna(subset=["lat", "lon"])
     df_valid = df_valid[(df_valid["lat"] != 0) & (df_valid["lon"] != 0)]
@@ -62,6 +57,7 @@ if not df_mandria.empty and "lat" in df_mandria.columns and "lon" in df_mandria.
 
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
+# SATELLITE GOOGLE (FISSO)
 folium.TileLayer(
     tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
     attr="Google Satellite",
@@ -71,26 +67,14 @@ folium.TileLayer(
 ).add_to(m)
 
 if saved_coords:
-    folium.Polygon(
-        locations=saved_coords,
-        color="yellow",
-        weight=3,
-        fill=True,
-        fill_opacity=0.2,
-    ).add_to(m)
+    folium.Polygon(locations=saved_coords, color="yellow", weight=3, fill=True, fill_opacity=0.2).add_to(m)
 
-if not df_mandria.empty and "lat" in df_mandria.columns:
-    for _, row in df_mandria.iterrows():
-        if pd.notna(row["lat"]) and row["lat"] != 0:
-            color = "green" if row["stato_recinto"] == "DENTRO" else "red"
-            folium.Marker(
-                [row["lat"], row["lon"]],
-                icon=folium.Icon(color=color, icon="info-sign"),
-            ).add_to(m)
+for _, row in df_mandria.iterrows():
+    if pd.notna(row.get("lat")) and row["lat"] != 0:
+        color = "green" if row.get("stato_recinto") == "DENTRO" else "red"
+        folium.Marker([row["lat"], row["lon"]], icon=folium.Icon(color=color, icon="info-sign")).add_to(m)
 
-Draw(
-    draw_options={"polyline": False, "rectangle": False, "circle": False, "marker": False, "polygon": True}
-).add_to(m)
+Draw(draw_options={"polyline": False, "rectangle": False, "circle": False, "marker": False, "polygon": True}).add_to(m)
 
 # --- 5. LAYOUT PRINCIPALE ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
@@ -105,61 +89,44 @@ with col_map:
             st.session_state.temp_coords = None
             st.rerun()
 
-    # Render Mappa
     out = st_folium(m, width="100%", height=650, key="main_map")
 
-    # --- CATTURA COORDINATE (robusta) ---
-    # prova all_drawings, poi last_active_drawing
-    drawing = None
-    if out:
-        if out.get("all_drawings") and isinstance(out["all_drawings"], list) and len(out["all_drawings"]) > 0:
-            drawing = out["all_drawings"][-1]
-        elif out.get("last_active_drawing") and isinstance(out["last_active_drawing"], dict):
-            drawing = out["last_active_drawing"]
+    # CATTURA COORDINATE
+    if out and out.get("all_drawings"):
+        drawings = out.get("all_drawings")
+        if len(drawings) > 0:
+            geom = drawings[-1].get("geometry")
+            if geom and geom.get("type") == "Polygon":
+                coords = geom.get("coordinates")[0]
+                st.session_state.temp_coords = [[p[1], p[0]] for p in coords]
 
-    if drawing and isinstance(drawing, dict):
-        geom = drawing.get("geometry")
-        if isinstance(geom, dict) and geom.get("type") == "Polygon":
-            coords = geom.get("coordinates")
-            # GeoJSON Polygon: [ [ [lon,lat], ... ] , ... ]
-            if isinstance(coords, list) and len(coords) > 0 and isinstance(coords[0], list):
-                ring = coords[0]
-                st.session_state.temp_coords = [[p[1], p[0]] for p in ring if isinstance(p, list) and len(p) >= 2]
-
-    # --- Pulsante SALVA (identico al tuo) ---
+    # PULSANTE SALVA (RIPRISTINATO E PERSISTENTE)
     if st.session_state.edit_mode:
-        if st.session_state.temp_coords:
-            st.success("📍 Poligono pronto per il salvataggio!")
-            if st.button("💾 CONFERMA E SALVA DEFINITIVAMENTE"):
+        st.info("📍 Disegna il recinto. Quando hai finito (poligono chiuso), clicca Salva.")
+        
+        # Il pulsante è sempre visibile qui durante l'edit_mode
+        if st.button("💾 CONFERMA E SALVA DEFINITIVAMENTE"):
+            if st.session_state.temp_coords:
                 with conn.session as s:
                     s.execute(
-                        text(
-                            "INSERT INTO recinti (id, nome, coords) "
-                            "VALUES (1, 'Pascolo', :coords) "
-                            "ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"
-                        ),
+                        text("INSERT INTO recinti (id, nome, coords) VALUES (1, 'Pascolo', :coords) ON CONFLICT (id) DO UPDATE SET coords = EXCLUDED.coords"),
                         {"coords": json.dumps(st.session_state.temp_coords)},
                     )
                     s.commit()
-
+                st.success("✅ Recinto salvato correttamente!")
                 st.session_state.edit_mode = False
                 st.session_state.temp_coords = None
-                st.success("Recinto salvato correttamente!")
-                # time.sleep(1)  # se vuoi rimetterlo, puoi, ma non è necessario
+                time.sleep(1)
                 st.rerun()
-        else:
-            st.info("Disegna il recinto sulla mappa e chiudi il poligono cliccando sul primo punto.")
+            else:
+                st.error("⚠️ Nessun poligono rilevato. Chiudi il disegno sulla mappa prima di salvare.")
 
 with col_table:
     st.subheader("⚠️ Stato")
     if not df_mandria.empty:
-        # Nota: qui presumo che la colonna 'batteria' esista sempre come nel tuo codice.
         df_emergenza = df_mandria[(df_mandria["stato_recinto"] == "FUORI") | (df_mandria["batteria"] <= 20)]
         st.dataframe(df_emergenza[["nome", "batteria"]], hide_index=True)
 
 st.divider()
 st.subheader("📝 Storico Mandria")
 st.dataframe(df_mandria, use_container_width=True, hide_index=True)
-
-# 6. RITARDO DI STABILIZZAZIONE (sconsigliato)
-# time.sleep(1)
