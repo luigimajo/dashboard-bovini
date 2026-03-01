@@ -2,14 +2,13 @@ requests
 geopy
 shapely
 pandas
-psycopg2-binary
 sqlalchemy
 paho-mqtt
-streamlit-autorefresh
-streamlit==1.54.0
 streamlit-folium==0.26.2
+leafmap>=0.43.0
+streamlit>=1.54.0
 folium==0.20.0
-streamlit-autorefresh>=1.0.1
 sqlalchemy>=2.0
 pandas>=2.0
 psycopg2-binary>=2.9
+streamlit-autorefresh>=1.0.1
