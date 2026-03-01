@@ -6,10 +6,12 @@ from streamlit_autorefresh import st_autorefresh
 from datetime import datetime
 import time
 
+import folium
+from folium.plugins import Draw
 import leafmap.foliumap as leafmap
 
 # --- CONFIG ---
-st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24 (LEAFMAP DRAW)")
+st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24 (LEAFMAP TEST)")
 
 # --- SESSION ---
 if "edit_mode" not in st.session_state:
@@ -68,57 +70,73 @@ with col_map:
             st.session_state.temp_coords = None
             st.rerun()
 
-    # MAP
+    # Leafmap (folium backend)
     m = leafmap.Map(center=(c_lat, c_lon), zoom=18)
 
-    # Google Satellite
+    # Satellite (tile layer)
     m.add_tile_layer(
         url="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
         name="Google Satellite",
         attribution="Google",
     )
 
-    # View overlays
+    # Accesso all'oggetto folium.Map interno
+    fm = m._map  # oggetto folium.Map
+
+    # Overlay in view mode (recinto + marker) tramite folium puro
     if not st.session_state.edit_mode:
         if saved_coords:
-            m.add_polygon(saved_coords, layer_name="Recinto", fill_opacity=0.2)
+            folium.Polygon(
+                locations=saved_coords,
+                color="yellow",
+                weight=3,
+                fill=True,
+                fill_opacity=0.2,
+            ).add_to(fm)
 
         if not df_mandria.empty and "lat" in df_mandria.columns and "lon" in df_mandria.columns:
             for _, row in df_mandria.iterrows():
                 if pd.notna(row["lat"]) and row["lat"] != 0:
-                    m.add_marker(location=(row["lat"], row["lon"]), popup=str(row.get("nome", "")))
+                    color = "green" if row.get("stato_recinto") == "DENTRO" else "red"
+                    folium.Marker(
+                        location=[row["lat"], row["lon"]],
+                        icon=folium.Icon(color=color, icon="info-sign"),
+                        popup=str(row.get("nome", "")),
+                    ).add_to(fm)
 
-    # Draw only in edit mode
+    # Draw in edit mode (folium.plugins.Draw)
     if st.session_state.edit_mode:
-        m.add_draw_control(
+        Draw(
             export=True,
-            draw_polygon=True,
-            draw_polyline=False,
-            draw_rectangle=False,
-            draw_circle=False,
-            draw_circlemarker=False,
-            draw_marker=False,
-        )
+            draw_options={
+                "polyline": False,
+                "rectangle": False,
+                "circle": False,
+                "marker": False,
+                "circlemarker": False,
+                "polygon": True,
+            },
+            edit_options={"edit": True, "remove": True},
+        ).add_to(fm)
 
+    # Render (leafmap->streamlit)
     out = m.to_streamlit(height=650)
 
-    # DEBUG: mostra output completo (solo in edit, così è leggibile)
-    with st.expander("🧪 DEBUG leafmap output"):
+    # DEBUG output (utile al primo giro)
+    with st.expander("🧪 DEBUG output leafmap"):
         st.write(out)
 
-    # Estrai GeoJSON: prendiamo l'ultima feature Polygon trovata ovunque dentro out
+    # Estrazione robusta dell'ultima Feature Polygon dall'output
     def find_last_polygon(obj):
         found = None
 
         def walk(x):
             nonlocal found
             if isinstance(x, dict):
-                # Feature
                 if x.get("type") == "Feature" and isinstance(x.get("geometry"), dict):
                     g = x["geometry"]
                     if g.get("type") == "Polygon" and isinstance(g.get("coordinates"), list):
                         found = x
-                # FeatureCollection
                 if x.get("type") == "FeatureCollection" and isinstance(x.get("features"), list):
                     for f in x["features"]:
                         walk(f)
@@ -135,10 +153,11 @@ with col_map:
         feat = find_last_polygon(out)
         if feat:
             coords = feat["geometry"]["coordinates"]  # [ [ [lon,lat], ... ] ]
-            ring = coords[0]
-            st.session_state.temp_coords = [[p[1], p[0]] for p in ring if isinstance(p, list) and len(p) >= 2]
+            if coords and isinstance(coords[0], list):
+                ring = coords[0]
+                st.session_state.temp_coords = [[p[1], p[0]] for p in ring if isinstance(p, list) and len(p) >= 2]
 
-    # Save UI (identico testo)
+    # Save UI (identico)
     if st.session_state.edit_mode:
         if st.session_state.temp_coords:
             st.success(f"📍 Poligono rilevato ({len(st.session_state.temp_coords)} punti).")
