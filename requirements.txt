@@ -12,3 +12,4 @@ streamlit==1.54.0
 leafmap>=0.43.0
 streamlit-autorefresh==1.0.1
 sqlalchemy>=2.0
+streamlit-map-polygon-extract==0.0.3
