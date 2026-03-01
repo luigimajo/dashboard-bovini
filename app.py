@@ -17,16 +17,18 @@ if "edit_mode" not in st.session_state:
 if "temp_coords" not in st.session_state:
     st.session_state.temp_coords = None
 
-# --- 2. LOGICA REFRESH STABILIZZATA (ANTI-RAFFICA + BLOCCO DISEGNO) ---
-if not st.session_state.edit_mode:
-    # Key statica per stabilità totale contro le triplette
-    st_autorefresh(interval=30000, key="timer_primario_30s")
-else:
+# --- 2. REFRESH ROBUSTO: DISARMA TIMER IN EDIT MODE ---
+# NOTE: anche se in edit non chiami autorefresh, il timer JS già creato può scattare.
+# Soluzione: montare un autorefresh "diverso" (key diversa) con interval=0 per smontare quello vecchio.
+if st.session_state.edit_mode:
+    st_autorefresh(interval=0, key="timer_edit_disabled")  # disarma
     st.sidebar.warning("🏗️ MODALITÀ DISEGNO: Refresh Disabilitato")
     if st.sidebar.button("🔓 Esci e annulla"):
         st.session_state.edit_mode = False
         st.session_state.temp_coords = None
         st.rerun()
+else:
+    st_autorefresh(interval=30000, key="timer_view_30s")  # attivo solo in view mode
 
 ora_log = datetime.now().strftime("%H:%M:%S.%f")[:-3]
 conn = st.connection("postgresql", type="sql")
@@ -109,17 +111,16 @@ with st.sidebar:
                     s.commit()
                 st.rerun()
 
-# --- 5. COSTRUZIONE MAPPA (DYNAMIC UPDATE) ---
+# --- 5. COSTRUZIONE MAPPA ---
 c_lat, c_lon = 37.9747, 13.5753
 if not df_mandria.empty and "lat" in df_mandria.columns and "lon" in df_mandria.columns:
     df_v = df_mandria.dropna(subset=["lat", "lon"]).query("lat != 0 and lon != 0")
     if not df_v.empty:
         c_lat, c_lon = df_v["lat"].mean(), df_v["lon"].mean()
 
-# Base map (stabile)
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
-# Satellite Google
+# --- BLOCCO SATELLITE GOOGLE ---
 folium.TileLayer(
     tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
     attr="Google Satellite",
@@ -128,16 +129,15 @@ folium.TileLayer(
     control=False,
 ).add_to(m)
 
-# Draw (stabile)
+# Draw plugin (stabile)
 Draw(
     draw_options={"polyline": False, "rectangle": False, "circle": False, "marker": False, "polygon": True},
     edit_options={"edit": False, "remove": False},
 ).add_to(m)
 
-# Overlay aggiornabile senza rimontare la mappa
+# Overlay (recinto + marker) in FeatureGroup aggiornabile
 fg = folium.FeatureGroup(name="overlay", overlay=True, control=False)
 
-# Recinto salvato
 if saved_coords:
     folium.Polygon(
         locations=saved_coords,
@@ -147,7 +147,6 @@ if saved_coords:
         fill_opacity=0.2,
     ).add_to(fg)
 
-# Marker bovini
 for _, row in df_mandria.iterrows():
     if pd.notna(row.get("lat")) and row["lat"] != 0:
         color = "green" if row.get("stato_recinto") == "DENTRO" else "red"
@@ -171,20 +170,20 @@ with col_map:
         m,
         center=[c_lat, c_lon],
         zoom=18,
-        feature_group_to_add=fg,              # <-- chiave: evita reset del draw mentre clicchi
+        feature_group_to_add=fg,              # aggiorna overlay senza rimontare
         returned_objects=["all_drawings"],    # meno payload
         use_container_width=True,
         height=650,
         key="main_map",
     )
 
-    # Cattura ultimo disegno (quando chiudi il poligono)
+    # Salva in sessione l'ultimo disegno CHIUSO
     if out and out.get("all_drawings") and len(out["all_drawings"]) > 0:
         raw = out["all_drawings"][-1]["geometry"]["coordinates"]
         # GeoJSON: [lon, lat] -> convertiamo in [lat, lon]
         if isinstance(raw[0][0], list):  # Polygon => [[[lon,lat],...]]
             st.session_state.temp_coords = [[p[1], p[0]] for p in raw[0]]
-        else:  # fallback
+        else:
             st.session_state.temp_coords = [[p[1], p[0]] for p in raw]
 
     if st.session_state.edit_mode:
@@ -209,22 +208,29 @@ with col_map:
 
 with col_table:
     st.subheader("⚠️ Pannello Emergenze")
-    df_emergenza = df_mandria[
-        (df_mandria.get("stato_recinto") == "FUORI") | (df_mandria.get("batteria", 100) <= 20)
-    ].copy()
+
+    # Nota: df_mandria.get('batteria', 100) se colonna non esiste non va bene perché .get su DataFrame
+    # Manteniamo la tua logica, ma in modo robusto:
+    if "batteria" in df_mandria.columns:
+        df_emergenza = df_mandria[(df_mandria["stato_recinto"] == "FUORI") | (df_mandria["batteria"] <= 20)].copy()
+    else:
+        df_emergenza = df_mandria[(df_mandria["stato_recinto"] == "FUORI")].copy()
 
     if not df_emergenza.empty:
         def genera_avvisi(row):
             avv = []
             if row.get("stato_recinto") == "FUORI":
                 avv.append("🚨 FUORI")
-            if row.get("batteria", 100) <= 20:
+            if "batteria" in row and pd.notna(row.get("batteria")) and row.get("batteria") <= 20:
                 avv.append("🪫 BATTERIA")
             return " + ".join(avv)
 
         df_emergenza["PROBLEMA"] = df_emergenza.apply(genera_avvisi, axis=1)
         st.error(f"Criticità: {len(df_emergenza)}")
-        cols = [c for c in ["nome", "PROBLEMA", "batteria"] if c in df_emergenza.columns]
+
+        cols = ["nome", "PROBLEMA"]
+        if "batteria" in df_emergenza.columns:
+            cols.append("batteria")
         st.dataframe(df_emergenza[cols], hide_index=True)
     else:
         st.success("✅ Tutto Sotto Controllo")
