@@ -1,4 +1,6 @@
 import streamlit as st
+import folium
+from streamlit_folium import st_folium
 import json
 import pandas as pd
 from sqlalchemy import text
@@ -6,23 +8,25 @@ from streamlit_autorefresh import st_autorefresh
 from datetime import datetime
 import time
 
-import folium
-from folium.plugins import Draw
-import leafmap.foliumap as leafmap
+# ✅ componente per estrarre poligoni come GeoJSON
+from st_map_polygon_extract import st_map_polygon_extract
 
-# --- CONFIG ---
-st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24 (LEAFMAP TEST)")
 
-# --- SESSION ---
+# --- 1. CONFIGURAZIONE PAGINA ---
+st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
+
+# --- Session state ---
 if "edit_mode" not in st.session_state:
     st.session_state.edit_mode = False
 if "temp_coords" not in st.session_state:
     st.session_state.temp_coords = None
 
-# --- REFRESH ---
+
+# --- 2. LOGICA REFRESH (ANTI-RAFFICA + BLOCCO DISEGNO) ---
 if not st.session_state.edit_mode:
-    st_autorefresh(interval=30000, key="timer_view_30s")
+    st_autorefresh(interval=30000, key="timer_primario_30s")
 else:
+    # disarmo hard del timer
     st_autorefresh(interval=0, key="timer_edit_disabled")
     st.sidebar.warning("🏗️ MODALITÀ DISEGNO: Refresh Disabilitato")
     if st.sidebar.button("🔓 Esci e annulla"):
@@ -30,135 +34,168 @@ else:
         st.session_state.temp_coords = None
         st.rerun()
 
+
 ora_log = datetime.now().strftime("%H:%M:%S.%f")[:-3]
 conn = st.connection("postgresql", type="sql")
 
+
+# --- 3. FUNZIONE CARICAMENTO DATI ---
 @st.cache_data(ttl=2)
 def load_data():
     try:
         df_m = conn.query("SELECT * FROM mandria ORDER BY nome ASC", ttl=0)
+        df_g = conn.query("SELECT * FROM gateway ORDER BY ultima_attivita DESC", ttl=0)
         df_r = conn.query("SELECT coords FROM recinti WHERE id = 1", ttl=0)
+
         coords = []
         if not df_r.empty:
             val = df_r.iloc[0]["coords"]
             coords = json.loads(val) if isinstance(val, str) else val
-        return df_m, coords
+        return df_m, df_g, coords
     except Exception:
-        return pd.DataFrame(), []
+        return pd.DataFrame(), pd.DataFrame(), []
 
-df_mandria, saved_coords = load_data()
 
-# --- SIDEBAR ---
+df_mandria, df_gateways, saved_coords = load_data()
+
+
+# --- 4. SIDEBAR COMPLETA ---
 with st.sidebar:
     st.header("📡 STATO RETE LORA")
     st.write(f"Ultimo Refresh: **{ora_log}**")
 
-# --- CENTER ---
+    if not df_gateways.empty:
+        for _, g in df_gateways.iterrows():
+            status_color = "#28a745" if g["stato"] == "ONLINE" else "#dc3545"
+            icon = "✅" if g["stato"] == "ONLINE" else "❌"
+            st.markdown(
+                f"""
+                <div style="border-left: 5px solid {status_color}; padding: 10px; background-color: rgba(255,255,255,0.05); border-radius: 5px; margin-bottom: 10px;">
+                    <b style="font-size: 14px;">{icon} {g['nome']}</b><br>
+                    <small>Stato: {g['stato']}</small>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    with st.expander("➕ Configura Nuovo Gateway"):
+        g_id = st.text_input("ID Gateway (TTN)")
+        g_nome = st.text_input("Nome Località")
+        if st.button("Registra Gateway"):
+            if g_id and g_nome:
+                with conn.session as s:
+                    s.execute(
+                        text("INSERT INTO gateway (id, nome, stato) VALUES (:id, :nome, 'ONLINE')"),
+                        {"id": g_id, "nome": g_nome},
+                    )
+                    s.commit()
+                st.rerun()
+
+    st.divider()
+    st.header("📋 GESTIONE BOVINI")
+
+    with st.expander("➕ Aggiungi Bovino"):
+        n_id = st.text_input("ID Tracker")
+        n_nome = st.text_input("Nome Animale")
+        if st.button("Salva Bovino"):
+            if n_id and n_nome:
+                with conn.session as s:
+                    s.execute(
+                        text(
+                            "INSERT INTO mandria (id, nome, lat, lon, stato_recinto) "
+                            "VALUES (:id, :nome, NULL, NULL, 'DENTRO') "
+                            "ON CONFLICT (id) DO UPDATE SET nome = EXCLUDED.nome"
+                        ),
+                        {"id": n_id, "nome": n_nome},
+                    )
+                    s.commit()
+                st.rerun()
+
+    if not df_mandria.empty:
+        with st.expander("🗑️ Rimuovi Bovino"):
+            bov_del = st.selectbox("Seleziona da eliminare:", df_mandria["nome"].tolist())
+            if st.button("Conferma Eliminazione"):
+                with conn.session as s:
+                    s.execute(text("DELETE FROM mandria WHERE nome=:nome"), {"nome": bov_del})
+                    s.commit()
+                st.rerun()
+
+
+# --- 5. COSTRUZIONE MAPPA (SOLO VISUALIZZAZIONE) ---
 c_lat, c_lon = 37.9747, 13.5753
 if not df_mandria.empty and "lat" in df_mandria.columns and "lon" in df_mandria.columns:
     df_v = df_mandria.dropna(subset=["lat", "lon"]).query("lat != 0 and lon != 0")
     if not df_v.empty:
         c_lat, c_lon = df_v["lat"].mean(), df_v["lon"].mean()
 
+m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
+
+# ✅ Satellite Google corretto
+folium.TileLayer(
+    tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+    attr="Google Satellite",
+    name="Google Satellite",
+    overlay=False,
+    control=False,
+).add_to(m)
+
+if saved_coords:
+    folium.Polygon(locations=saved_coords, color="yellow", weight=3, fill=True, fill_opacity=0.2).add_to(m)
+
+for _, row in df_mandria.iterrows():
+    if pd.notna(row.get("lat")) and row["lat"] != 0:
+        color = "green" if row.get("stato_recinto") == "DENTRO" else "red"
+        folium.Marker(
+            [row["lat"], row["lon"]],
+            icon=folium.Icon(color=color, icon="info-sign"),
+            popup=str(row.get("nome", "")),
+        ).add_to(m)
+
+
+# --- 6. LAYOUT PRINCIPALE ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
 col_map, col_table = st.columns([3, 1])
 
 with col_map:
+    # Bottone per entrare in modalità disegno
     if not st.session_state.edit_mode:
         if st.button("🏗️ INIZIA DISEGNO NUOVO RECINTO"):
             st.session_state.edit_mode = True
             st.session_state.temp_coords = None
             st.rerun()
 
-    # Leafmap (folium backend)
-    m = leafmap.Map(center=(c_lat, c_lon), zoom=18)
-
-    # Satellite (tile layer)
-    m.add_tile_layer(
-        url="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
-        name="Google Satellite",
-        attribution="Google",
-    )
-
-    # Accesso all'oggetto folium.Map interno
-    fm = m._map  # oggetto folium.Map
-
-    # Overlay in view mode (recinto + marker) tramite folium puro
+    # VIEW MODE: mappa folium normale
     if not st.session_state.edit_mode:
-        if saved_coords:
-            folium.Polygon(
-                locations=saved_coords,
-                color="yellow",
-                weight=3,
-                fill=True,
-                fill_opacity=0.2,
-            ).add_to(fm)
+        st_folium(m, use_container_width=True, height=650, key="main_map_view")
 
-        if not df_mandria.empty and "lat" in df_mandria.columns and "lon" in df_mandria.columns:
-            for _, row in df_mandria.iterrows():
-                if pd.notna(row["lat"]) and row["lat"] != 0:
-                    color = "green" if row.get("stato_recinto") == "DENTRO" else "red"
-                    folium.Marker(
-                        location=[row["lat"], row["lon"]],
-                        icon=folium.Icon(color=color, icon="info-sign"),
-                        popup=str(row.get("nome", "")),
-                    ).add_to(fm)
+    # EDIT MODE: componente disegno che restituisce GeoJSON
+    else:
+        st.info("✏️ Disegna il recinto nel pannello qui sotto e chiudi il poligono.")
 
-    # Draw in edit mode (folium.plugins.Draw)
-    if st.session_state.edit_mode:
-        Draw(
-            export=True,
-            draw_options={
-                "polyline": False,
-                "rectangle": False,
-                "circle": False,
-                "marker": False,
-                "circlemarker": False,
-                "polygon": True,
-            },
-            edit_options={"edit": True, "remove": True},
-        ).add_to(fm)
+        # Questo componente restituisce una lista di GeoJSON (o None)
+        geo = st_map_polygon_extract()
 
-    # Render (leafmap->streamlit)
-    out = m.to_streamlit(height=650)
+        # Debug opzionale (puoi commentare)
+        with st.expander("🧪 DEBUG poligoni (GeoJSON)"):
+            st.write(geo)
 
-    # DEBUG output (utile al primo giro)
-    with st.expander("🧪 DEBUG output leafmap"):
-        st.write(out)
+        # Estrai ultimo poligono valido
+        temp_coords = None
+        try:
+            if geo and isinstance(geo, list) and len(geo) > 0:
+                last = geo[-1]
+                # atteso: {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[lon,lat],...]]}}
+                geom = last.get("geometry", {})
+                if geom.get("type") == "Polygon":
+                    ring = geom.get("coordinates", [])[0]  # anello esterno
+                    if ring and isinstance(ring, list):
+                        temp_coords = [[p[1], p[0]] for p in ring if isinstance(p, list) and len(p) >= 2]
+        except Exception:
+            temp_coords = None
 
-    # Estrazione robusta dell'ultima Feature Polygon dall'output
-    def find_last_polygon(obj):
-        found = None
+        st.session_state.temp_coords = temp_coords
 
-        def walk(x):
-            nonlocal found
-            if isinstance(x, dict):
-                if x.get("type") == "Feature" and isinstance(x.get("geometry"), dict):
-                    g = x["geometry"]
-                    if g.get("type") == "Polygon" and isinstance(g.get("coordinates"), list):
-                        found = x
-                if x.get("type") == "FeatureCollection" and isinstance(x.get("features"), list):
-                    for f in x["features"]:
-                        walk(f)
-                for v in x.values():
-                    walk(v)
-            elif isinstance(x, list):
-                for it in x:
-                    walk(it)
-
-        walk(obj)
-        return found
-
-    if st.session_state.edit_mode and out is not None:
-        feat = find_last_polygon(out)
-        if feat:
-            coords = feat["geometry"]["coordinates"]  # [ [ [lon,lat], ... ] ]
-            if coords and isinstance(coords[0], list):
-                ring = coords[0]
-                st.session_state.temp_coords = [[p[1], p[0]] for p in ring if isinstance(p, list) and len(p) >= 2]
-
-    # Save UI (identico)
-    if st.session_state.edit_mode:
+        # Pulsante salva (identico al tuo)
         if st.session_state.temp_coords:
             st.success(f"📍 Poligono rilevato ({len(st.session_state.temp_coords)} punti).")
             if st.button("💾 CONFERMA E SALVA DEFINITIVAMENTE"):
@@ -172,24 +209,26 @@ with col_map:
                         {"coords": json.dumps(st.session_state.temp_coords)},
                     )
                     s.commit()
+
                 st.success("✅ Recinto salvato!")
                 st.session_state.edit_mode = False
                 st.session_state.temp_coords = None
                 time.sleep(1)
                 st.rerun()
         else:
-            st.info("Disegna sulla mappa e chiudi il poligono cliccando sul primo punto.")
+            st.warning("Nessun poligono valido ancora. Disegna e chiudi il poligono.")
 
 with col_table:
     st.subheader("⚠️ Stato")
     if not df_mandria.empty:
-        cols = ["nome"]
         if "batteria" in df_mandria.columns:
-            df_emergenza = df_mandria[(df_mandria["stato_recinto"] == "FUORI") | (df_mandria["batteria"] <= 20)].copy()
-            cols = ["nome", "batteria"]
+            df_emergenza = df_mandria[
+                (df_mandria["stato_recinto"] == "FUORI") | (df_mandria["batteria"] <= 20)
+            ].copy()
+            st.dataframe(df_emergenza[["nome", "batteria"]], hide_index=True)
         else:
             df_emergenza = df_mandria[(df_mandria["stato_recinto"] == "FUORI")].copy()
-        st.dataframe(df_emergenza[cols], hide_index=True)
+            st.dataframe(df_emergenza[["nome"]], hide_index=True)
 
 st.divider()
 st.subheader("📝 Storico Mandria")
