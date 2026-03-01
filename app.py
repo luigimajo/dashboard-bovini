@@ -62,6 +62,17 @@ df_mandria, df_gateways, saved_coords = load_data()
 with st.sidebar:
     st.header("📡 STATO RETE LORA")
     st.write(f"Ultimo Refresh: **{ora_log}**")
+    from importlib.metadata import version, PackageNotFoundError
+
+def pkgver(name):
+    try:
+        return version(name)
+    except PackageNotFoundError:
+        return "NOT INSTALLED"
+
+st.sidebar.write("streamlit-folium:", pkgver("streamlit-folium"))
+st.sidebar.write("folium:", pkgver("folium"))
+st.sidebar.write("streamlit:", pkgver("streamlit"))
 
     if not df_gateways.empty:
         for _, g in df_gateways.iterrows():
