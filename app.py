@@ -13,13 +13,13 @@ import uuid
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# Inizializzazione stati di sessione
+# --- SESSION STATE ---
 if "edit_mode" not in st.session_state:
     st.session_state.edit_mode = False
 if "temp_coords" not in st.session_state:
     st.session_state.temp_coords = None
 
-# MODIFICA 1) refresh flag + session id + map key stabile + scadenza lock
+# refresh flag + session id + map key stabile + scadenza lock
 if "refresh_enabled" not in st.session_state:
     st.session_state.refresh_enabled = True
 if "session_id" not in st.session_state:
@@ -29,14 +29,26 @@ if "draw_session_id" not in st.session_state:
 if "lock_expires_at" not in st.session_state:
     st.session_state.lock_expires_at = None
 
+# DEBUG toggle
+if "debug" not in st.session_state:
+    st.session_state.debug = True  # metti False per spegnerlo
+
 LOCK_MINUTES = 5
 now = datetime.now()
-
 ora_log = now.strftime("%H:%M:%S.%f")[:-3]
 conn = st.connection("postgresql", type="sql")
 
+
 # -----------------------------
-# LOCK GLOBALE via DB (evita blocchi eterni + concorrenza multi-istanza)
+# DEBUG helper
+# -----------------------------
+def dbg(msg: str):
+    if st.session_state.debug:
+        st.sidebar.write(msg)
+
+
+# -----------------------------
+# LOCK GLOBALE via DB
 # -----------------------------
 def ensure_lock_table():
     """
@@ -45,20 +57,30 @@ def ensure_lock_table():
     """
     try:
         with conn.session as s:
-            s.execute(text("""
-                CREATE TABLE IF NOT EXISTS recinto_lock (
+            s.execute(
+                text(
+                    """
+                CREATE TABLE IF NOT EXISTS public.recinto_lock (
                     id integer PRIMARY KEY,
                     locked boolean NOT NULL DEFAULT false,
                     locked_by text,
                     locked_at timestamptz
                 );
-            """))
-            s.execute(text("INSERT INTO recinto_lock (id) VALUES (1) ON CONFLICT (id) DO NOTHING;"))
+            """
+                )
+            )
+            s.execute(
+                text(
+                    "INSERT INTO public.recinto_lock (id) VALUES (1) ON CONFLICT (id) DO NOTHING;"
+                )
+            )
             s.commit()
-    except Exception:
-        pass
+    except Exception as e:
+        dbg(f"DDL lock table skipped/failed: {e}")
+
 
 ensure_lock_table()
+
 
 def try_lock_recinto(lock_id: int, who: str, ttl_minutes: int) -> bool:
     """
@@ -66,8 +88,9 @@ def try_lock_recinto(lock_id: int, who: str, ttl_minutes: int) -> bool:
     """
     with conn.session as s:
         res = s.execute(
-            text("""
-                UPDATE recinto_lock
+            text(
+                """
+                UPDATE public.recinto_lock
                 SET locked = true, locked_by = :who, locked_at = now()
                 WHERE id = :id
                   AND (
@@ -76,11 +99,13 @@ def try_lock_recinto(lock_id: int, who: str, ttl_minutes: int) -> bool:
                      OR locked_at < (now() - (:ttl || ' minutes')::interval)
                   )
                 RETURNING id;
-            """),
+            """
+            ),
             {"id": lock_id, "who": who, "ttl": str(ttl_minutes)},
         ).fetchone()
         s.commit()
     return res is not None
+
 
 def unlock_recinto(lock_id: int, who: str):
     """
@@ -88,21 +113,24 @@ def unlock_recinto(lock_id: int, who: str):
     """
     with conn.session as s:
         s.execute(
-            text("""
-                UPDATE recinto_lock
+            text(
+                """
+                UPDATE public.recinto_lock
                 SET locked = false, locked_by = NULL, locked_at = NULL
                 WHERE id = :id AND locked_by = :who;
-            """),
+            """
+            ),
             {"id": lock_id, "who": who},
         )
         s.commit()
+
 
 @st.cache_data(ttl=2)
 def get_lock_state(lock_id: int):
     try:
         df = conn.query(
-            "SELECT locked, locked_by, locked_at FROM recinto_lock WHERE id = 1",
-            ttl=0
+            "SELECT locked, locked_by, locked_at FROM public.recinto_lock WHERE id = 1",
+            ttl=0,
         )
         if df.empty:
             return False, None, None
@@ -111,21 +139,39 @@ def get_lock_state(lock_id: int):
     except Exception:
         return False, None, None
 
-# --- 2. LOGICA REFRESH STABILIZZATA (ANTI-RAFFICA + BLOCCO DISEGNO) ---
-# MODIFICA 2) usa refresh_enabled anziché edit_mode
+
+# -----------------------------
+# DEBUG PANEL (always in sidebar)
+# -----------------------------
+dbg("---- DEBUG ----")
+dbg(f"Run now: {datetime.now().strftime('%H:%M:%S')}")
+dbg(f"edit_mode={st.session_state.edit_mode}")
+dbg(f"refresh_enabled={st.session_state.refresh_enabled}")
+dbg(f"lock_expires_at={st.session_state.lock_expires_at!r}")
+dbg(f"draw_session_id={st.session_state.draw_session_id}")
+dbg(f"session_id={st.session_state.session_id}")
+
+# -----------------------------
+# REFRESH 30s (strumentato)
+# -----------------------------
+refresh_counter = None
 if st.session_state.refresh_enabled:
-    st_autorefresh(interval=30000, key="timer_primario_30s")
+    refresh_counter = st_autorefresh(interval=30000, key="timer_primario_30s")
+    dbg(f"AUTOREFRESH MONTATO: counter={refresh_counter}")
 else:
+    dbg("AUTOREFRESH NON MONTATO (refresh_enabled=False)")
     st.sidebar.warning("🏗️ MODALITÀ DISEGNO: Refresh Disabilitato")
 
-# MODIFICA 5) (nota anti-lock eterno) + timer 5 minuti:
-# se scade, annulla, riabilita refresh, prova a sbloccare
+# -----------------------------
+# TIMEOUT DISEGNO (5 min): se scade, annulla e riabilita refresh + unlock
+# -----------------------------
 if st.session_state.edit_mode and st.session_state.lock_expires_at is not None:
     if now >= st.session_state.lock_expires_at:
+        dbg("TIMEOUT SCADUTO: auto-annullo e ripristino refresh")
         try:
             unlock_recinto(1, st.session_state.session_id)
-        except Exception:
-            pass
+        except Exception as e:
+            dbg(f"unlock timeout failed: {e}")
         st.session_state.edit_mode = False
         st.session_state.temp_coords = None
         st.session_state.refresh_enabled = True
@@ -133,21 +179,41 @@ if st.session_state.edit_mode and st.session_state.lock_expires_at is not None:
         st.sidebar.error("⏱️ Tempo scaduto (5 min): disegno annullato, refresh riabilitato.")
         st.rerun()
 
-# Pulsante annulla in sidebar (sempre disponibile in edit)
+# -----------------------------
+# SIDEBAR (originale + lock status + annulla)
+# -----------------------------
 with st.sidebar:
+    st.header("📡 STATO RETE LORA")
+    st.write(f"Ultimo Refresh: **{ora_log}**")
+
+    locked, locked_by, locked_at = get_lock_state(1)
+    if locked:
+        if locked_by == st.session_state.session_id:
+            st.info("🔒 Lock recinto attivo (questa sessione).")
+        else:
+            st.info("🔒 Recinto in modifica da un'altra sessione.")
+        st.caption(f"locked_by: {locked_by}")
+        st.caption(f"locked_at: {locked_at}")
+    else:
+        st.success("🔓 Nessun lock attivo sul recinto.")
+
+    # Pulsante annulla (in sidebar)
     if st.session_state.edit_mode:
         if st.button("🔓 Esci e annulla"):
+            dbg("CLICK: ANNULLA")
             try:
                 unlock_recinto(1, st.session_state.session_id)
-            except Exception:
-                pass
+            except Exception as e:
+                dbg(f"unlock annulla failed: {e}")
             st.session_state.edit_mode = False
             st.session_state.temp_coords = None
             st.session_state.refresh_enabled = True
             st.session_state.lock_expires_at = None
             st.rerun()
 
-# --- 3. FUNZIONE CARICAMENTO DATI ---
+# -----------------------------
+# 3. FUNZIONE CARICAMENTO DATI (originale)
+# -----------------------------
 @st.cache_data(ttl=2)
 def load_data():
     try:
@@ -162,24 +228,13 @@ def load_data():
     except Exception:
         return pd.DataFrame(), pd.DataFrame(), []
 
+
 df_mandria, df_gateways, saved_coords = load_data()
 
-# --- 4. SIDEBAR: GESTIONE INFRASTRUTTURA E MANDRIA ---
+# -----------------------------
+# 4. SIDEBAR: gateway + mandria (originale)
+# -----------------------------
 with st.sidebar:
-    st.header("📡 STATO RETE LORA")
-    st.write(f"Ultimo Refresh: **{ora_log}**")
-
-    locked, locked_by, locked_at = get_lock_state(1)
-    if locked:
-        if locked_by == st.session_state.session_id:
-            st.info("🔒 Lock recinto attivo (stai disegnando).")
-        else:
-            st.info("🔒 Recinto in modifica da un'altra sessione.")
-        st.caption(f"locked_by: {locked_by}")
-        st.caption(f"locked_at: {locked_at}")
-    else:
-        st.success("🔓 Nessun lock attivo sul recinto.")
-
     if not df_gateways.empty:
         for _, g in df_gateways.iterrows():
             status_color = "#28a745" if g["stato"] == "ONLINE" else "#dc3545"
@@ -190,7 +245,7 @@ with st.sidebar:
                     <b style="font-size: 14px;">{icon} {g['nome']}</b><br>
                     <small>Stato: {g['stato']}</small>
                 </div>
-                """,
+            """,
                 unsafe_allow_html=True,
             )
 
@@ -201,7 +256,9 @@ with st.sidebar:
             if g_id and g_nome:
                 with conn.session as s:
                     s.execute(
-                        text("INSERT INTO gateway (id, nome, stato) VALUES (:id, :nome, 'ONLINE')"),
+                        text(
+                            "INSERT INTO gateway (id, nome, stato) VALUES (:id, :nome, 'ONLINE')"
+                        ),
                         {"id": g_id, "nome": g_nome},
                     )
                     s.commit()
@@ -209,7 +266,6 @@ with st.sidebar:
 
     st.divider()
     st.header("📋 GESTIONE BOVINI")
-
     with st.expander("➕ Aggiungi Bovino"):
         n_id = st.text_input("ID Tracker")
         n_nome = st.text_input("Nome Animale")
@@ -236,7 +292,9 @@ with st.sidebar:
                     s.commit()
                 st.rerun()
 
-# --- 5. COSTRUZIONE MAPPA ---
+# -----------------------------
+# 5. COSTRUZIONE MAPPA (originale + extra temp polygon)
+# -----------------------------
 c_lat, c_lon = 37.9747, 13.5753
 if not df_mandria.empty and "lat" in df_mandria.columns and "lon" in df_mandria.columns:
     df_v = df_mandria.dropna(subset=["lat", "lon"]).query("lat != 0 and lon != 0")
@@ -245,7 +303,6 @@ if not df_mandria.empty and "lat" in df_mandria.columns and "lon" in df_mandria.
 
 m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
 
-# --- BLOCCO SATELLITE GOOGLE RICHIESTO (FISSO) ---
 folium.TileLayer(
     tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
     attr="Google Satellite",
@@ -254,13 +311,18 @@ folium.TileLayer(
     control=False,
 ).add_to(m)
 
-# Recinto salvato
 if saved_coords:
     folium.Polygon(locations=saved_coords, color="yellow", weight=3, fill=True, fill_opacity=0.2).add_to(m)
 
-# EXTRA: ridisegna il poligono temporaneo ad ogni rerun (se già chiuso almeno una volta)
+# EXTRA: ridisegna poligono temporaneo ad ogni rerun (se già chiuso almeno una volta)
 if st.session_state.edit_mode and st.session_state.temp_coords:
-    folium.Polygon(locations=st.session_state.temp_coords, color="cyan", weight=3, fill=True, fill_opacity=0.15).add_to(m)
+    folium.Polygon(
+        locations=st.session_state.temp_coords,
+        color="cyan",
+        weight=3,
+        fill=True,
+        fill_opacity=0.15,
+    ).add_to(m)
 
 for _, row in df_mandria.iterrows():
     if pd.notna(row["lat"]) and row["lat"] != 0:
@@ -269,18 +331,25 @@ for _, row in df_mandria.iterrows():
 
 Draw(draw_options={"polyline": False, "rectangle": False, "circle": False, "marker": False, "polygon": True}).add_to(m)
 
-# --- 6. LAYOUT PRINCIPALE ---
+# -----------------------------
+# 6. LAYOUT PRINCIPALE
+# -----------------------------
 st.title("🛰️ MONITORAGGIO BOVINI H24")
 col_map, col_table = st.columns([3, 1])
 
 with col_map:
-    # MODIFICA 3) quando inizi: prova lock DB + disabilita refresh + avvia timer 5 min + key mappa stabile
     if not st.session_state.edit_mode:
         if st.button("🏗️ INIZIA DISEGNO NUOVO RECINTO"):
+            dbg("CLICK: INIZIA DISEGNO")
+            dbg(
+                f"Prima: edit_mode={st.session_state.edit_mode}, refresh_enabled={st.session_state.refresh_enabled}"
+            )
+
             ok = False
             try:
                 ok = try_lock_recinto(1, st.session_state.session_id, LOCK_MINUTES)
-            except Exception:
+            except Exception as e:
+                dbg(f"try_lock_recinto error: {e}")
                 ok = False
 
             if not ok:
@@ -291,18 +360,26 @@ with col_map:
                 st.session_state.temp_coords = None
                 st.session_state.lock_expires_at = datetime.now() + timedelta(minutes=LOCK_MINUTES)
 
-                # key nuova SOLO quando inizi un nuovo recinto (evita remount casuali)
+                # nuova istanza mappa SOLO quando inizi un nuovo recinto
                 st.session_state.draw_session_id += 1
+
+                dbg(
+                    f"Dopo set: edit_mode={st.session_state.edit_mode}, refresh_enabled={st.session_state.refresh_enabled}"
+                )
+                dbg(f"lock_expires_at settato a: {st.session_state.lock_expires_at!r}")
+
                 st.rerun()
 
-    # Timer visibile (client-side, NON fa rerun)
+    # Countdown visibile (JS client-side)
     if st.session_state.edit_mode and st.session_state.lock_expires_at:
-        expires_iso = st.session_state.lock_expires_at.isoformat()
+        # ISO super compatibile (senza microsecondi)
+        expires_iso = st.session_state.lock_expires_at.strftime("%Y-%m-%dT%H:%M:%S")
         components.html(
             f"""
             <div style="padding:10px;border:1px solid rgba(255,255,255,0.25);border-radius:8px;">
               <div style="font-weight:700;margin-bottom:6px;">⏱️ Tempo massimo per disegnare: {LOCK_MINUTES} minuti</div>
               <div>Tempo rimanente: <span id="cd" style="font-weight:800;">--:--</span></div>
+              <div style="opacity:0.75;font-size:12px;margin-top:4px;">Scadenza: {expires_iso}</div>
             </div>
             <script>
               const expires = new Date("{expires_iso}").getTime();
@@ -319,10 +396,10 @@ with col_map:
               setInterval(tick, 250);
             </script>
             """,
-            height=80,
+            height=95,
         )
 
-    # MODIFICA EXTRA: key mappa basata su draw_session_id (stabile durante il disegno)
+    # key mappa stabile durante disegno
     map_key = f"main_map_{st.session_state.draw_session_id}"
     out = st_folium(m, width="100%", height=650, key=map_key)
 
@@ -334,11 +411,11 @@ with col_map:
             else [[p[1], p[0]] for p in raw]
         )
 
-    # MODIFICA 4) quando salvi: salva, unlock, riabilita refresh, reset timer
     if st.session_state.edit_mode:
         if st.session_state.temp_coords:
             st.success("📍 Poligono pronto!")
             if st.button("💾 SALVA NUOVO RECINTO"):
+                dbg("CLICK: SALVA RECINTO")
                 with conn.session as s:
                     s.execute(
                         text(
@@ -351,8 +428,8 @@ with col_map:
 
                 try:
                     unlock_recinto(1, st.session_state.session_id)
-                except Exception:
-                    pass
+                except Exception as e:
+                    dbg(f"unlock save failed: {e}")
 
                 st.session_state.edit_mode = False
                 st.session_state.temp_coords = None
@@ -364,9 +441,12 @@ with col_map:
 
 with col_table:
     st.subheader("⚠️ Pannello Emergenze")
-    df_emergenza = df_mandria[(df_mandria["stato_recinto"] == "FUORI") | (df_mandria.get("batteria", 100) <= 20)].copy()
+    df_emergenza = df_mandria[
+        (df_mandria["stato_recinto"] == "FUORI") | (df_mandria.get("batteria", 100) <= 20)
+    ].copy()
 
     if not df_emergenza.empty:
+
         def genera_avvisi(row):
             avv = []
             if row.get("stato_recinto") == "FUORI":
