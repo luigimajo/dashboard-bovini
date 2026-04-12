@@ -136,12 +136,15 @@ col_map, col_table = st.columns([3, 1])
 
 with col_map:
     # Google Satellite ripristinato
+  
     m = folium.Map(location=[37.9747, 13.5753], zoom_start=18, tiles=None)
     folium.TileLayer(
-        tiles="https://google.com{x}&y={y}&z={z}",
+# ---        tiles="https://google.com{x}&y={y}&z={z}",
+        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
         attr="Google Satellite", name="Google Satellite", overlay=False
     ).add_to(m)
 
+    
     # Disegna recinti (Verde = Attivo, Giallo = Altri)
     for _, r in df_recinti.iterrows():
         color = "green" if r['attivo'] else "orange"
