@@ -1,176 +1,225 @@
-import dash
-from dash import html, dcc, Input, Output, State
-import dash_leaflet as dl
-import pandas as pd
+import streamlit as st
+import streamlit.components.v1 as components
+import folium
+from streamlit_folium import st_folium
 import json
-from sqlalchemy import create_engine, text
-from datetime import datetime
+import pandas as pd
+from sqlalchemy import text
+from streamlit_autorefresh import st_autorefresh
+from datetime import datetime, timedelta
+import uuid
 
-# --- CONFIGURAZIONE DATABASE ---
-# Sostituisci con la tua stringa di connessione Supabase
-DB_URL = "postgresql://postgres:TUA_PASSWORD@IL_TUO_HOST:5432/postgres"
-engine = create_engine(DB_URL)
+# --- 1. CONFIGURAZIONE PAGINA E COSTANTI ---
+st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# Inizializzazione App
-app = dash.Dash(__name__, 
-                title="SISTEMA MONITORAGGIO BOVINI H24",
-                external_scripts=["https://cloudflare.com"])
-server = app.server # Necessario per il Procfile (gunicorn)
+LOCK_MINUTES = 5
+now = datetime.now()
+ora_log = now.strftime("%H:%M:%S.%f")[:-3]
 
-# --- LAYOUT ---
-app.layout = html.Div([
-    # Timer per aggiornamento dati (30 secondi)
-    dcc.Interval(id='interval-refresh', interval=30*1000, n_intervals=0),
+# --- 2. SESSION STATE (MEMORIA DINAMICA) ---
+if "map_center" not in st.session_state:
+    st.session_state.map_center = [37.9747, 13.5753]
+if "map_zoom" not in st.session_state:
+    st.session_state.map_zoom = 18
+if "edit_mode" not in st.session_state:
+    st.session_state.edit_mode = False
+if "refresh_enabled" not in st.session_state:
+    st.session_state.refresh_enabled = True
+if "draft_points" not in st.session_state:
+    st.session_state.draft_points = []
+if "temp_coords" not in st.session_state:
+    st.session_state.temp_coords = None
+if "last_click_sig" not in st.session_state:
+    st.session_state.last_click_sig = None
+if "draw_session_id" not in st.session_state:
+    st.session_state.draw_session_id = 0
+if "lock_expires_at" not in st.session_state:
+    st.session_state.lock_expires_at = None
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
+
+conn = st.connection("postgresql", type="sql")
+
+# --- FUNZIONI DI LOCK DB ---
+def try_lock_recinto(lock_id, who, ttl):
+    with conn.session as s:
+        res = s.execute(text("""
+            UPDATE public.recinto_lock SET locked = true, locked_by = :who, locked_at = now()
+            WHERE id = :id AND (locked = false OR locked_at < (now() - (:ttl || ' minutes')::interval))
+            RETURNING id;"""), {"id": lock_id, "who": who, "ttl": str(ttl)}).fetchone()
+        s.commit()
+    return res is not None
+
+def unlock_recinto(lock_id, who):
+    with conn.session as s:
+        s.execute(text("UPDATE public.recinto_lock SET locked = false, locked_by = NULL, locked_at = NULL WHERE id = :id AND locked_by = :who"), 
+                  {"id": lock_id, "who": who})
+        s.commit()
+
+# --- CARICAMENTO DATI ---
+@st.cache_data(ttl=2)
+def load_data():
+    df_m = conn.query("SELECT * FROM mandria ORDER BY nome ASC", ttl=0)
+    df_g = conn.query("SELECT * FROM gateway ORDER BY ultima_attivita DESC", ttl=0)
+    df_r = conn.query("SELECT * FROM recinti ORDER BY id ASC", ttl=0)
+    return df_m, df_g, df_r
+
+df_mandria, df_gateways, df_recinti = load_data()
+
+# --- REFRESH ---
+if st.session_state.refresh_enabled:
+    st_autorefresh(interval=30000, key="timer_30s")
+
+# --- SIDEBAR ---
+with st.sidebar:
+    st.header("📡 RETE E FREQUENZA")
+    st.write(f"Ultimo Refresh: **{ora_log}**")
     
-    # Intestazione
-    html.Div([
-        html.H2("🛰️ MONITORAGGIO BOVINI H24 - DASH VERSION", style={'color': '#2c3e50', 'margin-bottom': '0'}),
-        html.P(id='last-update-text', style={'color': '#7f8c8d'})
-    ], style={'padding': '15px', 'backgroundColor': 'white', 'textAlign': 'center', 'boxShadow': '0 2px 5px rgba(0,0,0,0.1)'}),
+    st.subheader("⏱️ Frequenza Tracker")
+    curr_f = int(df_mandria['frequenza_desiderata'].iloc[0]) if not df_mandria.empty else 30
+    new_f = st.slider("Minuti Invio (Normale)", 1, 120, curr_f)
+    if st.button("Aggiorna Frequenza Tracker", key="btn_freq"):
+        with conn.session as s:
+            s.execute(text("UPDATE mandria SET frequenza_desiderata = :f"), {"f": new_f})
+            s.commit()
+        st.success(f"Coda TTN aggiornata a {new_f} min")
 
-    html.Div([
-        # --- COLONNA SINISTRA: MAPPA ---
-        html.Div([
-            dl.Map([
-                # Google Satellite Layer
-                dl.TileLayer(
-                    url='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-               #     url='https://google.com{x}&y={y}&z={z}',
-                    attribution='Google Satellite',
-                    id="satellite-layer"
-                ),
-                
-                # Layer per Recinti (Popolati dal database)
-                dl.LayerGroup(id='layer-recinti'),
-                
-                # Layer per Bovini (Popolati dal database)
-                dl.LayerGroup(id='layer-bovini'),
-                
-                # Tool di Disegno (Poligono)
-                dl.EditControl(
-                    id="edit-control",
-                    draw={
-                        "polyline": False, "rectangle": False, "circle": False, 
-                        "marker": False, "circlemarker": False,
-                        "polygon": {"allowIntersection": False, "drawError": {"color": "#e1e1e1", "message": "No!"}}
-                    }
-                )
-            ], 
-            id='main-map', 
-            center=[37.9747, 13.5753], 
-            zoom=18, 
-            style={'width': '100%', 'height': '85vh'})
-        ], style={'width': '75%', 'display': 'inline-block', 'padding': '5px'}),
-
-        # --- COLONNA DESTRA: CONTROLLI ---
-        html.Div([
-            html.Div([
-                html.H4("⏱️ Frequenza Tracker"),
-                dcc.Slider(1, 60, 30, step=1, id='slider-freq', marks={1: '1m', 30: '30m', 60: '60m'}),
-                html.Button("Invia Comando", id='btn-save-freq', className="btn-save", style={'width': '100%', 'marginTop': '10px'}),
-                html.Div(id='msg-freq', style={'fontSize': '12px', 'marginTop': '5px'})
-            ], className="control-card"),
-
-            html.Div([
-                html.H4("🗺️ Nuovo Pascolo"),
-                dcc.Input(id='input-nome-recinto', type='text', placeholder='Nome recinto...', style={'width': '90%'}),
-                html.P("Disegna il poligono sulla mappa e premi Salva:"),
-                html.Button("💾 Salva Nuovo Recinto", id='btn-save-recinto', n_clicks=0, style={'width': '100%', 'backgroundColor': '#28a745', 'color': 'white'}),
-                html.Div(id='msg-recinto', style={'fontSize': '12px', 'marginTop': '5px'})
-            ], className="control-card", style={'marginTop': '20px'}),
-
-            html.Div([
-                html.H4("📡 Gateway & Info"),
-                html.Div(id='lista-gateway', style={'maxHeight': '200px', 'overflowY': 'auto'})
-            ], className="control-card", style={'marginTop': '20px'})
-            
-        ], style={'width': '22%', 'display': 'inline-block', 'verticalAlign': 'top', 'padding': '10px'})
-    ], style={'display': 'flex'})
-], style={'backgroundColor': '#f4f7f6', 'minHeight': '100vh'})
-
-# --- CALLBACK: AGGIORNAMENTO DATI (BOVINI, RECINTI, GATEWAY) ---
-@app.callback(
-    [Output('layer-bovini', 'children'),
-     Output('layer-recinti', 'children'),
-     Output('lista-gateway', 'children'),
-     Output('last-update-text', 'children')],
-    [Input('interval-refresh', 'n_intervals')]
-)
-def refresh_data(n):
-    with engine.connect() as conn:
-        df_m = pd.read_sql("SELECT * FROM mandria", conn)
-        df_r = pd.read_sql("SELECT * FROM recinti", conn)
-        df_g = pd.read_sql("SELECT * FROM gateway", conn)
-
-    # 1. Marker Bovini
-    bovini_markers = []
-    for _, b in df_m.iterrows():
-        if b['lat'] and b['lon']:
-            color = "green" if b['stato_recinto'] == 'DENTRO' else "red"
-            bovini_markers.append(dl.Marker(
-                position=[b['lat'], b['lon']],
-                children=[dl.Tooltip(f"{b['nome']} - Batt: {b['batteria']}%")],
-                # Usiamo icone colorate standard Leaflet
-                icon={"iconUrl": f"https://rawgit.com{color}.png", "iconSize": [25, 41]}
-            ))
-
-    # 2. Poligoni Recinti
-    recinti_poligoni = []
-    for _, r in df_r.iterrows():
-        # In Dash-Leaflet le posizioni sono già [lat, lon]
-        recinti_poligoni.append(dl.Polygon(
-            positions=json.loads(r['coords']),
-            color="green" if r['attivo'] else "orange",
-            fill=r['attivo'],
-            fillOpacity=0.2,
-            children=[dl.Tooltip(r['nome'])]
-        ))
-
-    # 3. Lista Gateway
-    gateway_list = [html.Div([
-        html.Span("● ", style={'color': 'green' if g['stato'] == 'ONLINE' else 'red'}),
-        html.Span(f"{g['nome']}")
-    ], style={'padding': '5px'}) for _, g in df_g.iterrows()]
-
-    update_time = f"Ultimo aggiornamento: {datetime.now().strftime('%H:%M:%S')}"
+    st.divider()
+    st.subheader("🛰️ Gateway")
+    for _, g in df_gateways.iterrows():
+        color = "#28a745" if g["stato"] == "ONLINE" else "#dc3545"
+        st.markdown(f'<div style="border-left:5px solid {color}; padding-left:10px;"><b>{g["nome"]}</b> ({g["stato"]})</div>', unsafe_allow_html=True)
     
-    return bovini_markers, recinti_poligoni, gateway_list, update_time
+    with st.expander("➕ Gestisci Mandria"):
+        b_id = st.text_input("ID Tracker", key="in_b_id")
+        b_nome = st.text_input("Nome", key="in_b_nome")
+        if st.button("Salva Bovino", key="btn_add_b"):
+            with conn.session as s:
+                s.execute(text("INSERT INTO mandria (id, nome, stato_recinto) VALUES (:id, :n, 'DENTRO') ON CONFLICT (id) DO UPDATE SET nome = EXCLUDED.nome"), {"id": b_id, "n": b_nome})
+                s.commit()
+            st.rerun()
 
-# --- CALLBACK: SALVATAGGIO NUOVO RECINTO ---
-@app.callback(
-    Output('msg-recinto', 'children'),
-    Input('btn-save-recinto', 'n_clicks'),
-    [State('edit-control', 'geojson'),
-     State('input-nome-recinto', 'value')]
-)
-def save_fence(n_clicks, geojson, nome):
-    if n_clicks > 0 and geojson:
-        try:
-            # Dash-Leaflet EditControl restituisce GeoJSON standard: [lon, lat]
-            # Dobbiamo invertire in [lat, lon] per il tuo database
-            raw_coords = geojson['features'][-1]['geometry']['coordinates'][0]
-            clean_coords = [[p[1], p[0]] for p in raw_coords]
-            
-            with engine.begin() as conn:
-                conn.execute(text("INSERT INTO recinti (nome, coords, attivo) VALUES (:n, :c, false)"),
-                             {"n": nome if nome else "Nuovo Pascolo", "c": json.dumps(clean_coords)})
-            return "✅ Recinto salvato!"
-        except Exception as e:
-            return f"❌ Errore: {str(e)}"
-    return ""
+# --- MAPPA E CONTROLLI ---
+st.title("🛰️ MONITORAGGIO BOVINI H24")
+# CORREZIONE RIGA 105: aggiunto l'argomento [3, 1] per definire le proporzioni delle colonne
+col_map, col_ctrl = st.columns([3, 1])
 
-# --- CALLBACK: AGGIORNA FREQUENZA ---
-@app.callback(
-    Output('msg-freq', 'children'),
-    Input('btn-save-freq', 'n_clicks'),
-    State('slider-freq', 'value')
-)
-def update_frequency(n_clicks, value):
-    if n_clicks and n_clicks > 0:
-        with engine.begin() as conn:
-            conn.execute(text("UPDATE mandria SET frequenza_desiderata = :v"), {"v": value})
-        return f"✅ Frequenza impostata a {value} min"
-    return ""
+with col_map:
+    m = folium.Map(
+        location=st.session_state.map_center, 
+        zoom_start=st.session_state.map_zoom, 
+        tiles=None
+    )
+    folium.TileLayer(
+        tiles='https://google.com{x}&y={y}&z={z}',
+        attr='Google Satellite', name='Google Satellite', overlay=False, control=False
+    ).add_to(m)
 
-if __name__ == '__main__':
-    app.run_server(debug=False)
+    for _, r in df_recinti.iterrows():
+        color = "green" if r['attivo'] else "orange"
+        folium.Polygon(locations=json.loads(r['coords']), color=color, weight=2, fill=r['attivo'], fill_opacity=0.2, popup=r['nome']).add_to(m)
+
+    for _, row in df_mandria.iterrows():
+        if pd.notna(row.get("lat")) and row["lat"] != 0:
+            color = "green" if row["stato_recinto"] == "DENTRO" else "red"
+            folium.Marker([row["lat"], row["lon"]], popup=row["nome"], icon=folium.Icon(color=color)).add_to(m)
+
+    if st.session_state.edit_mode:
+        folium.LatLngPopup().add_to(m)
+        if len(st.session_state.draft_points) >= 2:
+            folium.PolyLine(st.session_state.draft_points, color="cyan", weight=3).add_to(m)
+        if st.session_state.temp_coords:
+            folium.Polygon(st.session_state.temp_coords, color="cyan", fill=True, fill_opacity=0.4).add_to(m)
+
+    # RENDER MAPPA
+    out = st_folium(m, width="100%", height=650, key=f"map_{st.session_state.draw_session_id}")
+
+    # AGGIORNAMENTO POSIZIONE (Sincronizzato per evitare salti)
+    if out is not None:
+        if out.get("center") and (out["center"]["lat"] != st.session_state.map_center[0]):
+            st.session_state.map_center = [out["center"]["lat"], out["center"]["lng"]]
+        if out.get("zoom") and (out["zoom"] != st.session_state.map_zoom):
+            st.session_state.map_zoom = out["zoom"]
+
+    if st.session_state.edit_mode and out and out.get("last_clicked"):
+        lat, lon = out["last_clicked"]["lat"], out["last_clicked"]["lng"]
+        click_sig = (round(lat, 6), round(lon, 6))
+        if click_sig != st.session_state.last_click_sig:
+            st.session_state.draft_points.append([lat, lon])
+            st.session_state.last_click_sig = click_sig
+            st.rerun()
+
+with col_ctrl:
+    st.subheader("🛠️ GESTIONE RECINTI")
+    
+    if not df_recinti.empty:
+        r_nomi = df_recinti['nome'].tolist()
+        r_att_df = df_recinti[df_recinti['attivo']==True]
+        idx_init = r_nomi.index(r_att_df['nome'].iloc[0]) if not r_att_df.empty else 0
+        r_sel = st.selectbox("Seleziona Pascolo:", r_nomi, index=idx_init, key="sel_r_manage")
+        
+        ca, ce = st.columns(2)
+        with ca:
+            if st.button("✅ Attiva", key="btn_r_act"):
+                with conn.session as s:
+                    s.execute(text("UPDATE recinti SET attivo = (nome = :n)"), {"n": r_sel})
+                    s.execute(text("UPDATE mandria SET ultimo_aggiornamento = now()"))
+                    s.commit()
+                st.rerun()
+        with ce:
+            if st.button("🗑️ Elimina", key="btn_r_del"):
+                with conn.session as s:
+                    s.execute(text("DELETE FROM recinti WHERE nome = :n"), {"n": r_sel})
+                    s.commit()
+                st.rerun()
+
+    st.divider()
+    if not st.session_state.edit_mode:
+        if st.button("🏗️ NUOVO RECINTO", key="btn_start_draw"):
+            if try_lock_recinto(1, st.session_state.session_id, LOCK_MINUTES):
+                st.session_state.edit_mode = True
+                st.session_state.refresh_enabled = False
+                st.session_state.lock_expires_at = datetime.now() + timedelta(minutes=LOCK_MINUTES)
+                st.session_state.draft_points = []
+                st.session_state.temp_coords = None
+                st.rerun()
+    else:
+        st.write(f"Punti: **{len(st.session_state.draft_points)}**")
+        b_undo, b_close, b_reset = st.columns(3)
+        with b_undo:
+            if st.button("↩️ Undo", key="btn_undo"): 
+                if st.session_state.draft_points: st.session_state.draft_points.pop(); st.session_state.temp_coords=None; st.rerun()
+        with b_close:
+            if st.button("✅ Chiudi", key="btn_close"):
+                if len(st.session_state.draft_points) > 2:
+                    st.session_state.temp_coords = st.session_state.draft_points + [st.session_state.draft_points[0]]
+                    st.rerun()
+        with b_reset:
+            if st.button("🧹 Reset", key="btn_reset"): 
+                st.session_state.draft_points = []; st.session_state.temp_coords = None; st.rerun()
+
+        if st.session_state.temp_coords:
+            nome_n = st.text_input("Nome Pascolo:", f"Recinto {len(df_recinti)+1}", key="in_new_r_name")
+            if st.button("💾 SALVA", key="btn_save_r"):
+                try:
+                    js_c = json.dumps(st.session_state.temp_coords)
+                    with conn.session as s:
+                        s.execute(text("INSERT INTO recinti (nome, coords, attivo) VALUES (:n, :c, false)"), {"n": nome_n, "c": js_c})
+                        s.commit()
+                    unlock_recinto(1, st.session_state.session_id)
+                    st.session_state.edit_mode = False
+                    st.session_state.refresh_enabled = True
+                    st.rerun()
+                except Exception as e: st.error(f"Errore: {e}")
+        
+        if st.button("❌ Annulla", key="btn_cancel_edit"):
+            unlock_recinto(1, st.session_state.session_id)
+            st.session_state.edit_mode = False
+            st.session_state.refresh_enabled = True
+            st.rerun()
+
+st.divider()
+st.subheader("📝 Storico Mandria")
+st.dataframe(df_mandria, use_container_width=True, hide_index=True)
+
+
