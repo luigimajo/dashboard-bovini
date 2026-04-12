@@ -12,6 +12,10 @@ import uuid
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
+# --- DEFINIZIONE ORARIO E LOG ---
+now = datetime.now()
+ora_log = now.strftime("%H:%M:%S.%f")[:-3]
+
 # --- 2. SESSION STATE (MEMORIA DINAMICA) ---
 if "map_center" not in st.session_state:
     st.session_state.map_center = [37.9747, 13.5753]
@@ -71,7 +75,6 @@ with st.sidebar:
     st.header("📡 RETE E FREQUENZA")
     st.write(f"Ultimo Refresh: **{ora_log}**")
     
-    # Cambio Frequenza
     st.subheader("⏱️ Frequenza Tracker")
     curr_f = int(df_mandria['frequenza_desiderata'].iloc[0]) if not df_mandria.empty else 30
     new_f = st.slider("Minuti Invio (Normale)", 1, 120, curr_f)
@@ -199,13 +202,12 @@ with col_ctrl:
                 try:
                     js_c = json.dumps(st.session_state.temp_coords)
                     with conn.session as s:
-                        # Salviamo il nuovo recinto senza attivarlo automaticamente
                         s.execute(text("INSERT INTO recinti (nome, coords, attivo) VALUES (:n, :c, false)"), {"n": nome_n, "c": js_c})
                         s.commit()
                     unlock_recinto(1, st.session_state.session_id)
                     st.session_state.edit_mode = False
                     st.session_state.refresh_enabled = True
-                    st.success("Recinto salvato! Puoi attivarlo dalla lista sopra.")
+                    st.success("Recinto salvato!")
                     st.rerun()
                 except Exception as e: st.error(f"Errore: {e}")
         
