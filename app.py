@@ -12,7 +12,11 @@ import uuid
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# --- SESSION STATE (Integrale) ---
+# --- 2. SESSION STATE (MEMORIA DINAMICA) ---
+if "map_center" not in st.session_state:
+    st.session_state.map_center = [37.9747, 13.5753]
+if "map_zoom" not in st.session_state:
+    st.session_state.map_zoom = 18
 if "edit_mode" not in st.session_state:
     st.session_state.edit_mode = False
 if "refresh_enabled" not in st.session_state:
@@ -29,12 +33,7 @@ if "lock_expires_at" not in st.session_state:
     st.session_state.lock_expires_at = None
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
-if "debug" not in st.session_state:
-    st.session_state.debug = False
 
-LOCK_MINUTES = 5
-now = datetime.now()
-ora_log = now.strftime("%H:%M:%S.%f")[:-3]
 conn = st.connection("postgresql", type="sql")
 
 # --- FUNZIONI DI LOCK DB ---
@@ -70,96 +69,47 @@ if st.session_state.refresh_enabled:
 # --- SIDEBAR ---
 with st.sidebar:
     st.header("📡 RETE E FREQUENZA")
-    st.write(f"Ultimo Refresh: **{ora_log}**")
     
-    # 1. Slider Frequenza (Downlink)
-    st.divider()
+    # Cambio Frequenza
+    st.subheader("⏱️ Frequenza Tracker")
     curr_f = int(df_mandria['frequenza_desiderata'].iloc[0]) if not df_mandria.empty else 30
     new_f = st.slider("Minuti Invio (Normale)", 1, 120, curr_f)
     if st.button("Aggiorna Frequenza Tracker", key="btn_freq"):
         with conn.session as s:
             s.execute(text("UPDATE mandria SET frequenza_desiderata = :f"), {"f": new_f})
             s.commit()
-        st.success(f"Coda TTN aggiornata: {new_f} min")
+        st.success(f"Coda TTN aggiornata a {new_f} min")
 
-    # 2. Gestione Gateway
     st.divider()
     st.subheader("🛰️ Gateway")
     for _, g in df_gateways.iterrows():
         color = "#28a745" if g["stato"] == "ONLINE" else "#dc3545"
-        st.markdown(f'<div style="border-left:5px solid {color}; padding-left:10px;"><b>{g["nome"]}</b></div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="border-left:5px solid {color}; padding-left:10px;"><b>{g["nome"]}</b> ({g["stato"]})</div>', unsafe_allow_html=True)
     
-    with st.expander("➕/➖ Gestisci Gateway"):
-        g_id = st.text_input("ID Gateway TTN", key="in_g_id")
-        g_nome = st.text_input("Località", key="in_g_nome")
-        if st.button("Aggiungi Gateway", key="btn_add_g"):
-            with conn.session as s:
-                s.execute(text("INSERT INTO gateway (id, nome, stato) VALUES (:id, :n, 'ONLINE')"), {"id": g_id, "n": g_nome})
-                s.commit()
-            st.rerun()
-        if not df_gateways.empty:
-            g_del = st.selectbox("Rimuovi:", df_gateways['id'].tolist(), key="sel_g_del")
-            if st.button("Elimina Gateway", key="btn_del_g"):
-                with conn.session as s:
-                    s.execute(text("DELETE FROM gateway WHERE id = :id"), {"id": g_del})
-                    s.commit()
-                st.rerun()
-
-    # 3. Gestione Bovini
-    st.divider()
-    st.subheader("🐄 Mandria")
-    with st.expander("Aggiungi/Rimuovi Bovino"):
-        b_id = st.text_input("ID Tracker LoRa", key="in_b_id")
-        b_nome = st.text_input("Nome Animale", key="in_b_nome")
+    with st.expander("➕/➖ Gestisci Mandria e Gateway"):
+        # Sezione Bovini
+        st.write("🐄 **Aggiungi Bovino**")
+        b_id = st.text_input("ID Tracker", key="in_b_id")
+        b_nome = st.text_input("Nome", key="in_b_nome")
         if st.button("Salva Bovino", key="btn_add_b"):
             with conn.session as s:
                 s.execute(text("INSERT INTO mandria (id, nome, stato_recinto) VALUES (:id, :n, 'DENTRO') ON CONFLICT (id) DO UPDATE SET nome = EXCLUDED.nome"), {"id": b_id, "n": b_nome})
                 s.commit()
             st.rerun()
-        if not df_mandria.empty:
-            b_del = st.selectbox("Elimina:", df_mandria['nome'].tolist(), key="sel_b_del")
-            if st.button("Elimina Bovino", key="btn_del_b"):
-                with conn.session as s:
-                    s.execute(text("DELETE FROM mandria WHERE nome = :n"), {"n": b_del})
-                    s.commit()
-                st.rerun()
 
-# --- MAPPA SATELLITARE ---
+# --- MAPPA E CONTROLLI ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
 col_map, col_ctrl = st.columns([3, 1])
 
 with col_map:
-    # Usa le coordinate salvate nel session_state invece di quelle fisse
+    # Creazione mappa con Memoria di Posizione
     m = folium.Map(
         location=st.session_state.map_center, 
         zoom_start=st.session_state.map_zoom, 
         tiles=None
     )
-    
-    # ... (Mantieni qui i tuoi TileLayer satellite e i cicli per disegnare i recinti e i bovini)
-
-    # Render della mappa e cattura dati
-    out = st_folium(m, width="100%", height=650, key=f"map_{st.session_state.draw_session_id}")
-
-    # LOGICA FONDAMENTALE: Salva l'ultima posizione della mappa vista dall'utente
-    if out:
-        if out.get("center"):
-            st.session_state.map_center = [out["center"]["lat"], out["center"]["lng"]]
-        if out.get("zoom"):
-            st.session_state.map_zoom = out["zoom"]
-
-    # Cattura click per i vertici (rimane uguale ma ora la mappa non "salta" più)
-    if st.session_state.edit_mode and out and out.get("last_clicked"):
-        lat, lon = out["last_clicked"]["lat"], out["last_clicked"]["lng"]
-        click_sig = (round(lat, 6), round(lon, 6))
-        if click_sig != st.session_state.last_click_sig:
-            st.session_state.draft_points.append([lat, lon])
-            st.session_state.last_click_sig = click_sig
-            st.rerun()
-
-    m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
     folium.TileLayer(
-       tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+        tiles='https://google.com{x}&y={y}&z={z}',
         attr='Google Satellite', name='Google Satellite', overlay=False, control=False
     ).add_to(m)
 
@@ -174,7 +124,7 @@ with col_map:
             color = "green" if row["stato_recinto"] == "DENTRO" else "red"
             folium.Marker([row["lat"], row["lon"]], popup=row["nome"], icon=folium.Icon(color=color)).add_to(m)
 
-    # Modalità Edit (Visualizzazione)
+    # Edit Mode: Visualizzazione Draft
     if st.session_state.edit_mode:
         folium.LatLngPopup().add_to(m)
         if len(st.session_state.draft_points) >= 2:
@@ -182,26 +132,17 @@ with col_map:
         if st.session_state.temp_coords:
             folium.Polygon(st.session_state.temp_coords, color="cyan", fill=True, fill_opacity=0.4).add_to(m)
 
-    # Bottone Nuova Modifica
-    if not st.session_state.edit_mode:
-        if st.button("🏗️ INIZIA NUOVO RECINTO", key="btn_start_draw"):
-            if try_lock_recinto(1, st.session_state.session_id, LOCK_MINUTES):
-                st.session_state.edit_mode = True
-                st.session_state.refresh_enabled = False
-                st.session_state.lock_expires_at = datetime.now() + timedelta(minutes=LOCK_MINUTES)
-                st.session_state.draft_points = []
-                st.session_state.temp_coords = None
-                st.session_state.draw_session_id += 1
-                if "map_center" not in st.session_state:
-                    st.session_state.map_center = [37.9747, 13.5753]
-                if "map_zoom" not in st.session_state:
-                    st.session_state.map_zoom = 18
-                st.rerun()
-
-    # Mappa Interattiva
+    # Render Mappa
     out = st_folium(m, width="100%", height=650, key=f"map_{st.session_state.draw_session_id}")
 
-    # Cattura Click
+    # SALVATAGGIO DINAMICO POSIZIONE (Centro e Zoom)
+    if out is not None:
+        if out.get("center"):
+            st.session_state.map_center = [out["center"]["lat"], out["center"]["lng"]]
+        if out.get("zoom"):
+            st.session_state.map_zoom = out["zoom"]
+
+    # Cattura Click per Vertici
     if st.session_state.edit_mode and out and out.get("last_clicked"):
         lat, lon = out["last_clicked"]["lat"], out["last_clicked"]["lng"]
         click_sig = (round(lat, 6), round(lon, 6))
@@ -213,12 +154,12 @@ with col_map:
 with col_ctrl:
     st.subheader("🛠️ GESTIONE RECINTI")
     
-    # 1. Attiva/Elimina Recinti
+    # 1. Attiva/Elimina
     if not df_recinti.empty:
         r_nomi = df_recinti['nome'].tolist()
         r_att_df = df_recinti[df_recinti['attivo']==True]
         idx_init = r_nomi.index(r_att_df['nome'].iloc[0]) if not r_att_df.empty else 0
-        r_sel = st.selectbox("Seleziona Recinto:", r_nomi, index=idx_init, key="sel_r_manage")
+        r_sel = st.selectbox("Seleziona Pascolo:", r_nomi, index=idx_init, key="sel_r_manage")
         
         ca, ce = st.columns(2)
         with ca:
@@ -236,12 +177,17 @@ with col_ctrl:
                 st.rerun()
 
     st.divider()
-
-    # 2. Editor Disegno (Indentazione corretta)
-    if st.session_state.edit_mode:
-        st.info("Clicca sulla mappa satellitare")
-        st.write(f"Punti: **{len(st.session_state.draft_points)}**")
-        
+    # 2. Editor Disegno
+    if not st.session_state.edit_mode:
+        if st.button("🏗️ NUOVO RECINTO", key="btn_start_draw"):
+            if try_lock_recinto(1, st.session_state.session_id, LOCK_MINUTES):
+                st.session_state.edit_mode = True
+                st.session_state.refresh_enabled = False
+                st.session_state.lock_expires_at = datetime.now() + timedelta(minutes=LOCK_MINUTES)
+                st.session_state.draft_points = []
+                st.rerun()
+    else:
+        st.write(f"Punti inseriti: **{len(st.session_state.draft_points)}**")
         b_undo, b_close, b_reset = st.columns(3)
         with b_undo:
             if st.button("↩️ Undo", key="btn_undo"): 
@@ -262,15 +208,13 @@ with col_ctrl:
                     js_c = json.dumps(st.session_state.temp_coords)
                     with conn.session as s:
                         s.execute(text("UPDATE recinti SET attivo = false"))
-                        s.execute(text("INSERT INTO recinti (nome, coords, attivo) VALUES (:n, :c, true)"), 
-                                  {"n": nome_n, "c": js_c})
+                        s.execute(text("INSERT INTO recinti (nome, coords, attivo) VALUES (:n, :c, true)"), {"n": nome_n, "c": js_c})
                         s.commit()
                     unlock_recinto(1, st.session_state.session_id)
                     st.session_state.edit_mode = False
                     st.session_state.refresh_enabled = True
                     st.rerun()
-                except Exception as e:
-                    st.error(f"Errore: {e}")
+                except Exception as e: st.error(f"Errore: {e}")
         
         if st.button("❌ Annulla Tutto", key="btn_cancel_edit"):
             unlock_recinto(1, st.session_state.session_id)
@@ -278,7 +222,6 @@ with col_ctrl:
             st.session_state.refresh_enabled = True
             st.rerun()
 
-# --- TABELLE STORICO ---
 st.divider()
 st.subheader("📝 Storico Mandria")
 st.dataframe(df_mandria, use_container_width=True, hide_index=True)
