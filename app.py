@@ -129,8 +129,34 @@ st.title("🛰️ MONITORAGGIO BOVINI H24")
 col_map, col_ctrl = st.columns([3, 1])
 
 with col_map:
-    # Calcolo centro mappa
-    c_lat, c_lon = 37.9747, 13.5753
+    # Usa le coordinate salvate nel session_state invece di quelle fisse
+    m = folium.Map(
+        location=st.session_state.map_center, 
+        zoom_start=st.session_state.map_zoom, 
+        tiles=None
+    )
+    
+    # ... (Mantieni qui i tuoi TileLayer satellite e i cicli per disegnare i recinti e i bovini)
+
+    # Render della mappa e cattura dati
+    out = st_folium(m, width="100%", height=650, key=f"map_{st.session_state.draw_session_id}")
+
+    # LOGICA FONDAMENTALE: Salva l'ultima posizione della mappa vista dall'utente
+    if out:
+        if out.get("center"):
+            st.session_state.map_center = [out["center"]["lat"], out["center"]["lng"]]
+        if out.get("zoom"):
+            st.session_state.map_zoom = out["zoom"]
+
+    # Cattura click per i vertici (rimane uguale ma ora la mappa non "salta" più)
+    if st.session_state.edit_mode and out and out.get("last_clicked"):
+        lat, lon = out["last_clicked"]["lat"], out["last_clicked"]["lng"]
+        click_sig = (round(lat, 6), round(lon, 6))
+        if click_sig != st.session_state.last_click_sig:
+            st.session_state.draft_points.append([lat, lon])
+            st.session_state.last_click_sig = click_sig
+            st.rerun()
+
     m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
     folium.TileLayer(
        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
@@ -166,6 +192,10 @@ with col_map:
                 st.session_state.draft_points = []
                 st.session_state.temp_coords = None
                 st.session_state.draw_session_id += 1
+                if "map_center" not in st.session_state:
+                    st.session_state.map_center = [37.9747, 13.5753]
+                if "map_zoom" not in st.session_state:
+                    st.session_state.map_zoom = 18
                 st.rerun()
 
     # Mappa Interattiva
