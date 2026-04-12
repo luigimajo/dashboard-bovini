@@ -103,17 +103,47 @@ with st.sidebar:
 st.title("🛰️ MONITORAGGIO BOVINI H24")
 # CORREZIONE RIGA 105: aggiunto l'argomento [3, 1] per definire le proporzioni delle colonne
 col_map, col_ctrl = st.columns([3, 1])
-
+# --- 1. MODIFICA LOGICA AGGIORNAMENTO POSIZIONE ---
 with col_map:
+    # Creiamo la mappa
     m = folium.Map(
         location=st.session_state.map_center, 
         zoom_start=st.session_state.map_zoom, 
         tiles=None
     )
+    
     folium.TileLayer(
         tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
         attr='Google Satellite', name='Google Satellite', overlay=False, control=False
     ).add_to(m)
+
+    # ... (Disegna recinti e bovini come prima)
+
+    # RENDER MAPPA
+    out = st_folium(
+        m, 
+        width="100%", 
+        height=650, 
+        key=f"map_{st.session_state.draw_session_id}",
+        returned_objects=["center", "zoom", "last_clicked"] # Specifichiamo cosa vogliamo indietro
+    )
+
+    # LOGICA ANTI-RESET: Aggiorniamo il session_state SOLO se i dati sono diversi
+    if out is not None:
+        new_lat = out.get("center", {}).get("lat")
+        new_lon = out.get("center", {}).get("lng")
+        new_zoom = out.get("zoom")
+
+        # Aggiorna il centro solo se l'utente ha effettivamente mosso la mappa
+        if new_lat and new_lon:
+            # Arrotondiamo per evitare micro-spostamenti dovuti al refresh
+            if round(new_lat, 5) != round(st.session_state.map_center[0], 5) or \
+               round(new_lon, 5) != round(st.session_state.map_center[1], 5):
+                st.session_state.map_center = [new_lat, new_lon]
+        
+        # Aggiorna lo zoom solo se è cambiato
+        if new_zoom and new_zoom != st.session_state.map_zoom:
+            st.session_state.map_zoom = new_zoom
 
     for _, r in df_recinti.iterrows():
         color = "green" if r['attivo'] else "orange"
