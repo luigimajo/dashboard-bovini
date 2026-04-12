@@ -9,10 +9,10 @@ from streamlit_autorefresh import st_autorefresh
 from datetime import datetime, timedelta
 import uuid
 
-# --- 1. CONFIGURAZIONE PAGINA ---
+# --- 1. CONFIGURAZIONE PAGINA E COSTANTI ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# --- DEFINIZIONE ORARIO E LOG ---
+LOCK_MINUTES = 5  # <--- DEFINITA ALL'INIZIO
 now = datetime.now()
 ora_log = now.strftime("%H:%M:%S.%f")[:-3]
 
@@ -90,7 +90,7 @@ with st.sidebar:
         color = "#28a745" if g["stato"] == "ONLINE" else "#dc3545"
         st.markdown(f'<div style="border-left:5px solid {color}; padding-left:10px;"><b>{g["nome"]}</b> ({g["stato"]})</div>', unsafe_allow_html=True)
     
-    with st.expander("➕/➖ Gestisci Mandria e Gateway"):
+    with st.expander("➕/➖ Gestisci Mandria"):
         st.write("🐄 **Aggiungi Bovino**")
         b_id = st.text_input("ID Tracker", key="in_b_id")
         b_nome = st.text_input("Nome", key="in_b_nome")
@@ -102,7 +102,7 @@ with st.sidebar:
 
 # --- MAPPA E CONTROLLI ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
-col_map, col_ctrl = st.columns([3, 1])
+col_map, col_ctrl = st.columns()
 
 with col_map:
     m = folium.Map(
@@ -111,7 +111,7 @@ with col_map:
         tiles=None
     )
     folium.TileLayer(
-        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+        tiles='https://google.com{x}&y={y}&z={z}',
         attr='Google Satellite', name='Google Satellite', overlay=False, control=False
     ).add_to(m)
 
@@ -197,7 +197,7 @@ with col_ctrl:
                 st.session_state.draft_points = []; st.session_state.temp_coords = None; st.rerun()
 
         if st.session_state.temp_coords:
-            nome_n = st.text_input("Nome Pascolo:", f"Recinto {len(df_recinti)+1}", key="in_new_r_name")
+            nome_n = st.text_input("Nome Pascolo:", f"Pascolo {len(df_recinti)+1}", key="in_new_r_name")
             if st.button("💾 SALVA", key="btn_save_r"):
                 try:
                     js_c = json.dumps(st.session_state.temp_coords)
@@ -207,7 +207,6 @@ with col_ctrl:
                     unlock_recinto(1, st.session_state.session_id)
                     st.session_state.edit_mode = False
                     st.session_state.refresh_enabled = True
-                    st.success("Recinto salvato!")
                     st.rerun()
                 except Exception as e: st.error(f"Errore: {e}")
         
