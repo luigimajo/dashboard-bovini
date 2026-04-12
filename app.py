@@ -211,28 +211,38 @@ with col_ctrl:
             if st.button("🧹 Reset"): st.session_state.draft_points = []; st.rerun()
 
                    # --- LOGICA SALVATAGGIO (Sostituisci questo blocco nell'Editor) ---
+        # --- EDITOR RECINTO (Allineamento corretto e Key univoche) ---
     if st.session_state.edit_mode:
-        st.info("Clicca sulla mappa satellitare")
-        st.write(f"Punti: {len(st.session_state.draft_points)}")
+        st.info("📍 Clicca sulla mappa satellitare per aggiungere i vertici.")
+        st.write(f"Punti inseriti: **{len(st.session_state.draft_points)}**")
         
         b1, b2, b3 = st.columns(3)
         with b1:
-            if st.button("↩️ Undo"): 
-                if st.session_state.draft_points: st.session_state.draft_points.pop(); st.rerun()
+            # Aggiunta key="undo_recinto"
+            if st.button("↩️ Undo", key="undo_recinto"): 
+                if st.session_state.draft_points: 
+                    st.session_state.draft_points.pop()
+                    st.session_state.temp_coords = None
+                    st.rerun()
         with b2:
-            if st.button("✅ Chiudi"):
+            # Aggiunta key="chiudi_recinto"
+            if st.button("✅ Chiudi", key="chiudi_recinto"):
                 if len(st.session_state.draft_points) > 2:
-                    # Chiusura corretta del poligono
                     st.session_state.temp_coords = st.session_state.draft_points + [st.session_state.draft_points[0]]
                     st.rerun()
+                else:
+                    st.warning("Servono almeno 3 punti!")
         with b3:
-            if st.button("🧹 Reset"): 
-                st.session_state.draft_points = []; st.session_state.temp_coords = None; st.rerun()
+            # Aggiunta key="reset_recinto"
+            if st.button("🧹 Reset", key="reset_recinto"): 
+                st.session_state.draft_points = []
+                st.session_state.temp_coords = None
+                st.rerun()
 
-        # QUESTO È IL BLOCCO CHE DAVA ERRORE (Controlla gli spazi qui sotto)
         if st.session_state.temp_coords:
-            nome_n = st.text_input("Nome Nuovo Pascolo:", f"Pascolo {datetime.now().strftime('%H:%M')}")
-            if st.button("💾 SALVA DEFINITIVO"):
+            nome_n = st.text_input("Nome Nuovo Pascolo:", f"Pascolo {datetime.now().strftime('%H:%M')}", key="input_nome_recinto")
+            # Aggiunta key="salva_def_recinto"
+            if st.button("💾 SALVA DEFINITIVO", key="salva_def_recinto"):
                 try:
                     js_c = json.dumps(st.session_state.temp_coords)
                     with conn.session as s:
@@ -245,10 +255,10 @@ with col_ctrl:
                     st.session_state.refresh_enabled = True
                     st.session_state.draft_points = []
                     st.session_state.temp_coords = None
+                    st.success("Salvato!")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Errore: {e}")
-
 
 # --- TABELLE FINALI ---
 st.divider()
