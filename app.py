@@ -69,6 +69,7 @@ if st.session_state.refresh_enabled:
 # --- SIDEBAR ---
 with st.sidebar:
     st.header("📡 RETE E FREQUENZA")
+    st.write(f"Ultimo Refresh: **{ora_log}**")
     
     # Cambio Frequenza
     st.subheader("⏱️ Frequenza Tracker")
@@ -87,7 +88,6 @@ with st.sidebar:
         st.markdown(f'<div style="border-left:5px solid {color}; padding-left:10px;"><b>{g["nome"]}</b> ({g["stato"]})</div>', unsafe_allow_html=True)
     
     with st.expander("➕/➖ Gestisci Mandria e Gateway"):
-        # Sezione Bovini
         st.write("🐄 **Aggiungi Bovino**")
         b_id = st.text_input("ID Tracker", key="in_b_id")
         b_nome = st.text_input("Nome", key="in_b_nome")
@@ -102,29 +102,25 @@ st.title("🛰️ MONITORAGGIO BOVINI H24")
 col_map, col_ctrl = st.columns([3, 1])
 
 with col_map:
-    # Creazione mappa con Memoria di Posizione
     m = folium.Map(
         location=st.session_state.map_center, 
         zoom_start=st.session_state.map_zoom, 
         tiles=None
     )
     folium.TileLayer(
-        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+        tiles='https://google.com{x}&y={y}&z={z}',
         attr='Google Satellite', name='Google Satellite', overlay=False, control=False
     ).add_to(m)
 
-    # Disegna Recinti
     for _, r in df_recinti.iterrows():
         color = "green" if r['attivo'] else "orange"
         folium.Polygon(locations=json.loads(r['coords']), color=color, weight=2, fill=r['attivo'], fill_opacity=0.2, popup=r['nome']).add_to(m)
 
-    # Marker Bovini
     for _, row in df_mandria.iterrows():
         if pd.notna(row.get("lat")) and row["lat"] != 0:
             color = "green" if row["stato_recinto"] == "DENTRO" else "red"
             folium.Marker([row["lat"], row["lon"]], popup=row["nome"], icon=folium.Icon(color=color)).add_to(m)
 
-    # Edit Mode: Visualizzazione Draft
     if st.session_state.edit_mode:
         folium.LatLngPopup().add_to(m)
         if len(st.session_state.draft_points) >= 2:
@@ -132,17 +128,14 @@ with col_map:
         if st.session_state.temp_coords:
             folium.Polygon(st.session_state.temp_coords, color="cyan", fill=True, fill_opacity=0.4).add_to(m)
 
-    # Render Mappa
     out = st_folium(m, width="100%", height=650, key=f"map_{st.session_state.draw_session_id}")
 
-    # SALVATAGGIO DINAMICO POSIZIONE (Centro e Zoom)
     if out is not None:
         if out.get("center"):
             st.session_state.map_center = [out["center"]["lat"], out["center"]["lng"]]
         if out.get("zoom"):
             st.session_state.map_zoom = out["zoom"]
 
-    # Cattura Click per Vertici
     if st.session_state.edit_mode and out and out.get("last_clicked"):
         lat, lon = out["last_clicked"]["lat"], out["last_clicked"]["lng"]
         click_sig = (round(lat, 6), round(lon, 6))
@@ -154,7 +147,6 @@ with col_map:
 with col_ctrl:
     st.subheader("🛠️ GESTIONE RECINTI")
     
-    # 1. Attiva/Elimina
     if not df_recinti.empty:
         r_nomi = df_recinti['nome'].tolist()
         r_att_df = df_recinti[df_recinti['attivo']==True]
@@ -177,7 +169,6 @@ with col_ctrl:
                 st.rerun()
 
     st.divider()
-    # 2. Editor Disegno
     if not st.session_state.edit_mode:
         if st.button("🏗️ NUOVO RECINTO", key="btn_start_draw"):
             if try_lock_recinto(1, st.session_state.session_id, LOCK_MINUTES):
@@ -185,13 +176,14 @@ with col_ctrl:
                 st.session_state.refresh_enabled = False
                 st.session_state.lock_expires_at = datetime.now() + timedelta(minutes=LOCK_MINUTES)
                 st.session_state.draft_points = []
+                st.session_state.temp_coords = None
                 st.rerun()
     else:
-        st.write(f"Punti inseriti: **{len(st.session_state.draft_points)}**")
+        st.write(f"Punti: **{len(st.session_state.draft_points)}**")
         b_undo, b_close, b_reset = st.columns(3)
         with b_undo:
             if st.button("↩️ Undo", key="btn_undo"): 
-                if st.session_state.draft_points: st.session_state.draft_points.pop(); st.rerun()
+                if st.session_state.draft_points: st.session_state.draft_points.pop(); st.session_state.temp_coords=None; st.rerun()
         with b_close:
             if st.button("✅ Chiudi", key="btn_close"):
                 if len(st.session_state.draft_points) > 2:
@@ -202,21 +194,22 @@ with col_ctrl:
                 st.session_state.draft_points = []; st.session_state.temp_coords = None; st.rerun()
 
         if st.session_state.temp_coords:
-            nome_n = st.text_input("Nome Pascolo:", f"Pascolo {len(df_recinti)+1}", key="in_new_r_name")
-            if st.button("💾 SALVA DEFINITIVO", key="btn_save_r"):
+            nome_n = st.text_input("Nome Pascolo:", f"Recinto {len(df_recinti)+1}", key="in_new_r_name")
+            if st.button("💾 SALVA", key="btn_save_r"):
                 try:
                     js_c = json.dumps(st.session_state.temp_coords)
                     with conn.session as s:
-                        s.execute(text("UPDATE recinti SET attivo = false"))
-                        s.execute(text("INSERT INTO recinti (nome, coords, attivo) VALUES (:n, :c, true)"), {"n": nome_n, "c": js_c})
+                        # Salviamo il nuovo recinto senza attivarlo automaticamente
+                        s.execute(text("INSERT INTO recinti (nome, coords, attivo) VALUES (:n, :c, false)"), {"n": nome_n, "c": js_c})
                         s.commit()
                     unlock_recinto(1, st.session_state.session_id)
                     st.session_state.edit_mode = False
                     st.session_state.refresh_enabled = True
+                    st.success("Recinto salvato! Puoi attivarlo dalla lista sopra.")
                     st.rerun()
                 except Exception as e: st.error(f"Errore: {e}")
         
-        if st.button("❌ Annulla Tutto", key="btn_cancel_edit"):
+        if st.button("❌ Annulla", key="btn_cancel_edit"):
             unlock_recinto(1, st.session_state.session_id)
             st.session_state.edit_mode = False
             st.session_state.refresh_enabled = True
