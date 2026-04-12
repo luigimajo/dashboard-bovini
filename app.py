@@ -12,7 +12,7 @@ import uuid
 # --- 1. CONFIGURAZIONE PAGINA E COSTANTI ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-LOCK_MINUTES = 5  # <--- DEFINITA ALL'INIZIO
+LOCK_MINUTES = 5
 now = datetime.now()
 ora_log = now.strftime("%H:%M:%S.%f")[:-3]
 
@@ -90,8 +90,7 @@ with st.sidebar:
         color = "#28a745" if g["stato"] == "ONLINE" else "#dc3545"
         st.markdown(f'<div style="border-left:5px solid {color}; padding-left:10px;"><b>{g["nome"]}</b> ({g["stato"]})</div>', unsafe_allow_html=True)
     
-    with st.expander("➕/➖ Gestisci Mandria"):
-        st.write("🐄 **Aggiungi Bovino**")
+    with st.expander("➕ Gestisci Mandria"):
         b_id = st.text_input("ID Tracker", key="in_b_id")
         b_nome = st.text_input("Nome", key="in_b_nome")
         if st.button("Salva Bovino", key="btn_add_b"):
@@ -102,7 +101,8 @@ with st.sidebar:
 
 # --- MAPPA E CONTROLLI ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
-col_map, col_ctrl = st.columns()
+# CORREZIONE RIGA 105: aggiunto l'argomento [3, 1] per definire le proporzioni delle colonne
+col_map, col_ctrl = st.columns([3, 1])
 
 with col_map:
     m = folium.Map(
@@ -131,12 +131,14 @@ with col_map:
         if st.session_state.temp_coords:
             folium.Polygon(st.session_state.temp_coords, color="cyan", fill=True, fill_opacity=0.4).add_to(m)
 
+    # RENDER MAPPA
     out = st_folium(m, width="100%", height=650, key=f"map_{st.session_state.draw_session_id}")
 
+    # AGGIORNAMENTO POSIZIONE (Sincronizzato per evitare salti)
     if out is not None:
-        if out.get("center"):
+        if out.get("center") and (out["center"]["lat"] != st.session_state.map_center[0]):
             st.session_state.map_center = [out["center"]["lat"], out["center"]["lng"]]
-        if out.get("zoom"):
+        if out.get("zoom") and (out["zoom"] != st.session_state.map_zoom):
             st.session_state.map_zoom = out["zoom"]
 
     if st.session_state.edit_mode and out and out.get("last_clicked"):
@@ -197,7 +199,7 @@ with col_ctrl:
                 st.session_state.draft_points = []; st.session_state.temp_coords = None; st.rerun()
 
         if st.session_state.temp_coords:
-            nome_n = st.text_input("Nome Pascolo:", f"Pascolo {len(df_recinti)+1}", key="in_new_r_name")
+            nome_n = st.text_input("Nome Pascolo:", f"Recinto {len(df_recinti)+1}", key="in_new_r_name")
             if st.button("💾 SALVA", key="btn_save_r"):
                 try:
                     js_c = json.dumps(st.session_state.temp_coords)
