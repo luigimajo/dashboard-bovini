@@ -210,18 +210,35 @@ with col_ctrl:
         with b3:
             if st.button("🧹 Reset"): st.session_state.draft_points = []; st.rerun()
 
-        if st.session_state.temp_coords:
-            nome_n = st.text_input("Nome Nuovo Pascolo:", "Recinto A")
+                if st.session_state.temp_coords:
+            nome_n = st.text_input("Nome Nuovo Pascolo:", f"Pascolo {datetime.now().strftime('%H:%M')}")
             if st.button("💾 SALVA DEFINITIVO"):
-                with conn.session as s:
-                    s.execute(text("UPDATE recinti SET attivo = false"))
-                    s.execute(text("INSERT INTO recinti (nome, coords, attivo) VALUES (:n, :c, true)"), 
-                              {"n": nome_n, "c": json.dumps(st.session_state.temp_coords)})
-                    s.commit()
-                unlock_recinto(1, st.session_state.session_id)
-                st.session_state.edit_mode = False
-                st.session_state.refresh_enabled = True
-                st.rerun()
+                try:
+                    # Convertiamo in stringa JSON prima di entrare nella sessione
+                    json_data = json.dumps(st.session_state.temp_coords)
+                    
+                    with conn.session as s:
+                        # 1. Disattiviamo i recinti esistenti
+                        s.execute(text("UPDATE recinti SET attivo = false"))
+                        # 2. Inseriamo il nuovo
+                        s.execute(
+                            text("INSERT INTO recinti (nome, coords, attivo) VALUES (:n, :c, true)"),
+                            {"n": nome_n, "c": json_data}
+                        )
+                        s.commit()
+                    
+                    # Pulizia stato DOPO il commit
+                    unlock_recinto(1, st.session_state.session_id)
+                    st.session_state.edit_mode = False
+                    st.session_state.refresh_enabled = True
+                    st.session_state.draft_points = []
+                    st.session_state.temp_coords = None
+                    
+                    st.success("Recinto salvato con successo!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Errore durante il salvataggio: {e}")
+
 
 # --- TABELLE FINALI ---
 st.divider()
