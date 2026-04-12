@@ -12,23 +12,32 @@ import uuid
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(layout="wide", page_title="SISTEMA MONITORAGGIO BOVINI H24")
 
-# --- SESSION STATE ORIGINALE RIPRISTINATO ---
-if "edit_mode" not in st.session_state: st.session_state.edit_mode = False
-if "refresh_enabled" not in st.session_state: st.session_state.refresh_enabled = True
-if "draft_points" not in st.session_state: st.session_state.draft_points = []
-if "temp_coords" not in st.session_state: st.session_state.temp_coords = None
-if "last_click_sig" not in st.session_state: st.session_state.last_click_sig = None
-if "draw_session_id" not in st.session_state: st.session_state.draw_session_id = 0
-if "lock_expires_at" not in st.session_state: st.session_state.lock_expires_at = None
-if "session_id" not in st.session_state: st.session_state.session_id = str(uuid.uuid4())
-if "debug" not in st.session_state: st.session_state.debug = False
+# --- SESSION STATE (Integrale) ---
+if "edit_mode" not in st.session_state:
+    st.session_state.edit_mode = False
+if "refresh_enabled" not in st.session_state:
+    st.session_state.refresh_enabled = True
+if "draft_points" not in st.session_state:
+    st.session_state.draft_points = []
+if "temp_coords" not in st.session_state:
+    st.session_state.temp_coords = None
+if "last_click_sig" not in st.session_state:
+    st.session_state.last_click_sig = None
+if "draw_session_id" not in st.session_state:
+    st.session_state.draw_session_id = 0
+if "lock_expires_at" not in st.session_state:
+    st.session_state.lock_expires_at = None
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
+if "debug" not in st.session_state:
+    st.session_state.debug = False
 
 LOCK_MINUTES = 5
 now = datetime.now()
 ora_log = now.strftime("%H:%M:%S.%f")[:-3]
 conn = st.connection("postgresql", type="sql")
 
-# --- FUNZIONI DI LOCK ---
+# --- FUNZIONI DI LOCK DB ---
 def try_lock_recinto(lock_id, who, ttl):
     with conn.session as s:
         res = s.execute(text("""
@@ -58,71 +67,74 @@ df_mandria, df_gateways, df_recinti = load_data()
 if st.session_state.refresh_enabled:
     st_autorefresh(interval=30000, key="timer_30s")
 
-# --- SIDEBAR: GESTIONE COMPLETA ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("📡 RETE E FREQUENZA")
+    st.write(f"Ultimo Refresh: **{ora_log}**")
     
-    # 1. Slider Frequenza
+    # 1. Slider Frequenza (Downlink)
+    st.divider()
     curr_f = int(df_mandria['frequenza_desiderata'].iloc[0]) if not df_mandria.empty else 30
     new_f = st.slider("Minuti Invio (Normale)", 1, 120, curr_f)
-    if st.button("Aggiorna Frequenza"):
+    if st.button("Aggiorna Frequenza Tracker", key="btn_freq"):
         with conn.session as s:
             s.execute(text("UPDATE mandria SET frequenza_desiderata = :f"), {"f": new_f})
             s.commit()
-        st.success(f"Coda TTN: {new_f} min")
+        st.success(f"Coda TTN aggiornata: {new_f} min")
 
+    # 2. Gestione Gateway
     st.divider()
-    
-    # 2. Gestione Gateway (Codice Originale Ripristinato)
     st.subheader("🛰️ Gateway")
     for _, g in df_gateways.iterrows():
         color = "#28a745" if g["stato"] == "ONLINE" else "#dc3545"
-        st.markdown(f'<div style="border-left:5px solid {color}; padding-left:10px;"><b>{g["nome"]}</b> ({g["stato"]})</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="border-left:5px solid {color}; padding-left:10px;"><b>{g["nome"]}</b></div>', unsafe_allow_html=True)
     
     with st.expander("➕/➖ Gestisci Gateway"):
-        g_id = st.text_input("ID Gateway")
-        g_nome = st.text_input("Nome")
-        if st.button("Aggiungi"):
+        g_id = st.text_input("ID Gateway TTN", key="in_g_id")
+        g_nome = st.text_input("Località", key="in_g_nome")
+        if st.button("Aggiungi Gateway", key="btn_add_g"):
             with conn.session as s:
                 s.execute(text("INSERT INTO gateway (id, nome, stato) VALUES (:id, :n, 'ONLINE')"), {"id": g_id, "n": g_nome})
                 s.commit()
             st.rerun()
-        g_del = st.selectbox("Rimuovi:", df_gateways['id'].tolist() if not df_gateways.empty else ["--"])
-        if st.button("Elimina Gateway"):
-            with conn.session as s:
-                s.execute(text("DELETE FROM gateway WHERE id = :id"), {"id": g_del})
-                s.commit()
-            st.rerun()
+        if not df_gateways.empty:
+            g_del = st.selectbox("Rimuovi:", df_gateways['id'].tolist(), key="sel_g_del")
+            if st.button("Elimina Gateway", key="btn_del_g"):
+                with conn.session as s:
+                    s.execute(text("DELETE FROM gateway WHERE id = :id"), {"id": g_del})
+                    s.commit()
+                st.rerun()
 
+    # 3. Gestione Bovini
     st.divider()
-
-    # 3. Gestione Bovini (Codice Originale Ripristinato)
     st.subheader("🐄 Mandria")
     with st.expander("Aggiungi/Rimuovi Bovino"):
-        b_id = st.text_input("ID Tracker")
-        b_nome = st.text_input("Nome Bovino")
-        if st.button("Salva"):
+        b_id = st.text_input("ID Tracker LoRa", key="in_b_id")
+        b_nome = st.text_input("Nome Animale", key="in_b_nome")
+        if st.button("Salva Bovino", key="btn_add_b"):
             with conn.session as s:
                 s.execute(text("INSERT INTO mandria (id, nome, stato_recinto) VALUES (:id, :n, 'DENTRO') ON CONFLICT (id) DO UPDATE SET nome = EXCLUDED.nome"), {"id": b_id, "n": b_nome})
                 s.commit()
             st.rerun()
-        b_del = st.selectbox("Elimina:", df_mandria['nome'].tolist() if not df_mandria.empty else ["--"])
-        if st.button("Elimina Bovino"):
-            with conn.session as s:
-                s.execute(text("DELETE FROM mandria WHERE nome = :n"), {"n": b_del})
-                s.commit()
-            st.rerun()
+        if not df_mandria.empty:
+            b_del = st.selectbox("Elimina:", df_mandria['nome'].tolist(), key="sel_b_del")
+            if st.button("Elimina Bovino", key="btn_del_b"):
+                with conn.session as s:
+                    s.execute(text("DELETE FROM mandria WHERE nome = :n"), {"n": b_del})
+                    s.commit()
+                st.rerun()
 
-# --- MAPPA SATELLITARE E RECINTI ---
+# --- MAPPA SATELLITARE ---
 st.title("🛰️ MONITORAGGIO BOVINI H24")
 col_map, col_ctrl = st.columns([3, 1])
 
 with col_map:
-    # Mappa Google Satellite Costante
-    m = folium.Map(location=[37.9747, 13.5753], zoom_start=18, tiles=None)
+    # Calcolo centro mappa
+    c_lat, c_lon = 37.9747, 13.5753
+    m = folium.Map(location=[c_lat, c_lon], zoom_start=18, tiles=None)
     folium.TileLayer(
-        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-        attr='Google Satellite', name='Google Satellite', overlay=False
+        tiles='https://google.com{x}&y={y}&z={z}',
+        attr='Google Satellite', name='Google Satellite', overlay=False, control=False
     ).add_to(m)
 
     # Disegna Recinti
@@ -132,11 +144,11 @@ with col_map:
 
     # Marker Bovini
     for _, row in df_mandria.iterrows():
-        if pd.notna(row.get("lat")):
+        if pd.notna(row.get("lat")) and row["lat"] != 0:
             color = "green" if row["stato_recinto"] == "DENTRO" else "red"
             folium.Marker([row["lat"], row["lon"]], popup=row["nome"], icon=folium.Icon(color=color)).add_to(m)
 
-    # Modalità Edit (Punti Azzurri)
+    # Modalità Edit (Visualizzazione)
     if st.session_state.edit_mode:
         folium.LatLngPopup().add_to(m)
         if len(st.session_state.draft_points) >= 2:
@@ -146,7 +158,7 @@ with col_map:
 
     # Bottone Nuova Modifica
     if not st.session_state.edit_mode:
-        if st.button("🏗️ INIZIA NUOVO RECINTO"):
+        if st.button("🏗️ INIZIA NUOVO RECINTO", key="btn_start_draw"):
             if try_lock_recinto(1, st.session_state.session_id, LOCK_MINUTES):
                 st.session_state.edit_mode = True
                 st.session_state.refresh_enabled = False
@@ -171,21 +183,23 @@ with col_map:
 with col_ctrl:
     st.subheader("🛠️ GESTIONE RECINTI")
     
-    # 1. Attiva/Elimina Recinti Esistenti
+    # 1. Attiva/Elimina Recinti
     if not df_recinti.empty:
         r_nomi = df_recinti['nome'].tolist()
-        r_sel = st.selectbox("Seleziona Recinto:", r_nomi)
+        r_att_df = df_recinti[df_recinti['attivo']==True]
+        idx_init = r_nomi.index(r_att_df['nome'].iloc[0]) if not r_att_df.empty else 0
+        r_sel = st.selectbox("Seleziona Recinto:", r_nomi, index=idx_init, key="sel_r_manage")
         
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("✅ Attiva"):
+        ca, ce = st.columns(2)
+        with ca:
+            if st.button("✅ Attiva", key="btn_r_act"):
                 with conn.session as s:
                     s.execute(text("UPDATE recinti SET attivo = (nome = :n)"), {"n": r_sel})
                     s.execute(text("UPDATE mandria SET ultimo_aggiornamento = now()"))
                     s.commit()
                 st.rerun()
-        with c2:
-            if st.button("🗑️ Elimina"):
+        with ce:
+            if st.button("🗑️ Elimina", key="btn_r_del"):
                 with conn.session as s:
                     s.execute(text("DELETE FROM recinti WHERE nome = :n"), {"n": r_sel})
                     s.commit()
@@ -193,56 +207,27 @@ with col_ctrl:
 
     st.divider()
 
-    # 2. Editor Disegno (Ripristinato Integrale)
+    # 2. Editor Disegno (Indentazione corretta)
     if st.session_state.edit_mode:
         st.info("Clicca sulla mappa satellitare")
-        st.write(f"Punti: {len(st.session_state.draft_points)}")
+        st.write(f"Punti: **{len(st.session_state.draft_points)}**")
         
-        b1, b2, b3 = st.columns(3)
-        with b1:
-            if st.button("↩️ Undo"): 
+        b_undo, b_close, b_reset = st.columns(3)
+        with b_undo:
+            if st.button("↩️ Undo", key="btn_undo"): 
                 if st.session_state.draft_points: st.session_state.draft_points.pop(); st.rerun()
-        with b2:
-            if st.button("✅ Chiudi"):
+        with b_close:
+            if st.button("✅ Chiudi", key="btn_close"):
                 if len(st.session_state.draft_points) > 2:
                     st.session_state.temp_coords = st.session_state.draft_points + [st.session_state.draft_points[0]]
                     st.rerun()
-        with b3:
-            if st.button("🧹 Reset"): st.session_state.draft_points = []; st.rerun()
-
-                   # --- LOGICA SALVATAGGIO (Sostituisci questo blocco nell'Editor) ---
-        # --- EDITOR RECINTO (Allineamento corretto e Key univoche) ---
-    if st.session_state.edit_mode:
-        st.info("📍 Clicca sulla mappa satellitare per aggiungere i vertici.")
-        st.write(f"Punti inseriti: **{len(st.session_state.draft_points)}**")
-        
-        b1, b2, b3 = st.columns(3)
-        with b1:
-            # Aggiunta key="undo_recinto"
-            if st.button("↩️ Undo", key="undo_recinto"): 
-                if st.session_state.draft_points: 
-                    st.session_state.draft_points.pop()
-                    st.session_state.temp_coords = None
-                    st.rerun()
-        with b2:
-            # Aggiunta key="chiudi_recinto"
-            if st.button("✅ Chiudi", key="chiudi_recinto"):
-                if len(st.session_state.draft_points) > 2:
-                    st.session_state.temp_coords = st.session_state.draft_points + [st.session_state.draft_points[0]]
-                    st.rerun()
-                else:
-                    st.warning("Servono almeno 3 punti!")
-        with b3:
-            # Aggiunta key="reset_recinto"
-            if st.button("🧹 Reset", key="reset_recinto"): 
-                st.session_state.draft_points = []
-                st.session_state.temp_coords = None
-                st.rerun()
+        with b_reset:
+            if st.button("🧹 Reset", key="btn_reset"): 
+                st.session_state.draft_points = []; st.session_state.temp_coords = None; st.rerun()
 
         if st.session_state.temp_coords:
-            nome_n = st.text_input("Nome Nuovo Pascolo:", f"Pascolo {datetime.now().strftime('%H:%M')}", key="input_nome_recinto")
-            # Aggiunta key="salva_def_recinto"
-            if st.button("💾 SALVA DEFINITIVO", key="salva_def_recinto"):
+            nome_n = st.text_input("Nome Pascolo:", f"Pascolo {len(df_recinti)+1}", key="in_new_r_name")
+            if st.button("💾 SALVA DEFINITIVO", key="btn_save_r"):
                 try:
                     js_c = json.dumps(st.session_state.temp_coords)
                     with conn.session as s:
@@ -253,14 +238,17 @@ with col_ctrl:
                     unlock_recinto(1, st.session_state.session_id)
                     st.session_state.edit_mode = False
                     st.session_state.refresh_enabled = True
-                    st.session_state.draft_points = []
-                    st.session_state.temp_coords = None
-                    st.success("Salvato!")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Errore: {e}")
+        
+        if st.button("❌ Annulla Tutto", key="btn_cancel_edit"):
+            unlock_recinto(1, st.session_state.session_id)
+            st.session_state.edit_mode = False
+            st.session_state.refresh_enabled = True
+            st.rerun()
 
-# --- TABELLE FINALI ---
+# --- TABELLE STORICO ---
 st.divider()
-st.subheader("📝 Storico Mandria Completo")
+st.subheader("📝 Storico Mandria")
 st.dataframe(df_mandria, use_container_width=True, hide_index=True)
