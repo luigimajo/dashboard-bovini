@@ -210,7 +210,7 @@ with col_ctrl:
         with b3:
             if st.button("🧹 Reset"): st.session_state.draft_points = []; st.rerun()
 
-                if st.session_state.temp_coords:
+               if st.session_state.temp_coords:
             nome_n = st.text_input("Nome Nuovo Pascolo:", f"Pascolo {datetime.now().strftime('%H:%M')}")
             if st.button("💾 SALVA DEFINITIVO"):
                 try:
