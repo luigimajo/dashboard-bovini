@@ -210,34 +210,44 @@ with col_ctrl:
         with b3:
             if st.button("🧹 Reset"): st.session_state.draft_points = []; st.rerun()
 
-               if st.session_state.temp_coords:
+                   # --- LOGICA SALVATAGGIO (Sostituisci questo blocco nell'Editor) ---
+    if st.session_state.edit_mode:
+        st.info("Clicca sulla mappa satellitare")
+        st.write(f"Punti: {len(st.session_state.draft_points)}")
+        
+        b1, b2, b3 = st.columns(3)
+        with b1:
+            if st.button("↩️ Undo"): 
+                if st.session_state.draft_points: st.session_state.draft_points.pop(); st.rerun()
+        with b2:
+            if st.button("✅ Chiudi"):
+                if len(st.session_state.draft_points) > 2:
+                    # Chiusura corretta del poligono
+                    st.session_state.temp_coords = st.session_state.draft_points + [st.session_state.draft_points[0]]
+                    st.rerun()
+        with b3:
+            if st.button("🧹 Reset"): 
+                st.session_state.draft_points = []; st.session_state.temp_coords = None; st.rerun()
+
+        # QUESTO È IL BLOCCO CHE DAVA ERRORE (Controlla gli spazi qui sotto)
+        if st.session_state.temp_coords:
             nome_n = st.text_input("Nome Nuovo Pascolo:", f"Pascolo {datetime.now().strftime('%H:%M')}")
             if st.button("💾 SALVA DEFINITIVO"):
                 try:
-                    # Convertiamo in stringa JSON prima di entrare nella sessione
-                    json_data = json.dumps(st.session_state.temp_coords)
-                    
+                    js_c = json.dumps(st.session_state.temp_coords)
                     with conn.session as s:
-                        # 1. Disattiviamo i recinti esistenti
                         s.execute(text("UPDATE recinti SET attivo = false"))
-                        # 2. Inseriamo il nuovo
-                        s.execute(
-                            text("INSERT INTO recinti (nome, coords, attivo) VALUES (:n, :c, true)"),
-                            {"n": nome_n, "c": json_data}
-                        )
+                        s.execute(text("INSERT INTO recinti (nome, coords, attivo) VALUES (:n, :c, true)"), 
+                                  {"n": nome_n, "c": js_c})
                         s.commit()
-                    
-                    # Pulizia stato DOPO il commit
                     unlock_recinto(1, st.session_state.session_id)
                     st.session_state.edit_mode = False
                     st.session_state.refresh_enabled = True
                     st.session_state.draft_points = []
                     st.session_state.temp_coords = None
-                    
-                    st.success("Recinto salvato con successo!")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Errore durante il salvataggio: {e}")
+                    st.error(f"Errore: {e}")
 
 
 # --- TABELLE FINALI ---
